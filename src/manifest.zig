@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2024-2026 CodePros
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const utils = @import("utils.zig");

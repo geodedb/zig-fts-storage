@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2024-2026 CodePros
+
 const std = @import("std");
 
 /// LEB128 decoding from a byte slice. Returns the value and bytes read.
