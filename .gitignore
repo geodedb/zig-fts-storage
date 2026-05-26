@@ -66,3 +66,6 @@ zig-*/
 *.key
 *.p12
 *.pfx
+
+# Scratch experiments at repo root
+/test_*.zig
