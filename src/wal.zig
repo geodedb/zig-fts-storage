@@ -81,13 +81,13 @@ pub const WalWriter = struct {
     io: std.Io,
     offset: u64,
 
-    pub fn init(io: std.Io, file: std.Io.File, allocator: Allocator) WalWriter {
-        const size = if (file.stat(io)) |s| s.size else |_| 0;
+    pub fn init(io: std.Io, file: std.Io.File, allocator: Allocator) !WalWriter {
+        const stat = try file.stat(io);
         return .{
             .io = io,
             .file = file,
             .allocator = allocator,
-            .offset = size,
+            .offset = stat.size,
         };
     }
 
@@ -247,7 +247,7 @@ test "WalReader reads records sequentially" {
     {
         const file = try tmp_dir.dir.createFile(io, file_path, .{});
         defer file.close(io);
-        var writer = WalWriter.init(io, file, alloc);
+        var writer = try WalWriter.init(io, file, alloc);
 
         const r1 = WalRecord{ .record_type = .begin, .txn_id = 1 };
         try writer.append(r1);

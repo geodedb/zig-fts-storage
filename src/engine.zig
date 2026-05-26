@@ -92,7 +92,7 @@ pub const Engine = struct {
 
         // Open WAL for writing
         engine.wal_file = try engine.wal_dir.createFile(io, "fts.wal", .{ .truncate = false });
-        engine.wal_writer = wal.WalWriter.init(io, engine.wal_file.?, allocator);
+        engine.wal_writer = try wal.WalWriter.init(io, engine.wal_file.?, allocator);
 
         return engine;
     }
@@ -332,7 +332,7 @@ pub const Engine = struct {
             f.close(self.io);
         }
         self.wal_file = try self.wal_dir.createFile(self.io, "fts.wal", .{ .truncate = true });
-        self.wal_writer = wal.WalWriter.init(self.io, self.wal_file.?, self.allocator);
+        self.wal_writer = try wal.WalWriter.init(self.io, self.wal_file.?, self.allocator);
 
         // Open SegmentReader and add to segments list
         const seg_reader = try segment.SegmentReader.init(self.io, self.allocator, self.seg_dir, next_segment_id);
