@@ -1,3 +1,24 @@
-# CODEOWNERS
-# Default owners for everything in the repo
-* @your-username
+# CODEOWNERS for devnw/zig/fts-storage
+# Format: <path-glob> <owner1> [<owner2>] ...
+# Replace placeholders below with real GitLab handles or groups before
+# enabling "Require CODEOWNER approval" on protected branches.
+
+# Default owner — must be replaced with a real GitLab handle/group
+* @codepros/fts-storage-maintainers
+
+# Storage engine code
+/src/                          @codepros/fts-storage-maintainers
+/tests/                        @codepros/fts-storage-maintainers
+/benchmarks/                   @codepros/fts-storage-maintainers
+/examples/                     @codepros/fts-storage-maintainers
+
+# Build / CI / supply chain
+/.gitlab-ci.yml                @codepros/fts-storage-maintainers
+/build.zig                     @codepros/fts-storage-maintainers
+/build.zig.zon                 @codepros/fts-storage-maintainers
+/scripts/                      @codepros/fts-storage-maintainers
+
+# Security-sensitive files
+/SECURITY.md                   @codepros/fts-storage-maintainers
+/.gitleaks.toml                @codepros/fts-storage-maintainers
+/.pre-commit-config.yaml       @codepros/fts-storage-maintainers
