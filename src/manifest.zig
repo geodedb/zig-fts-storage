@@ -6,6 +6,8 @@ const Allocator = std.mem.Allocator;
 const utils = @import("utils.zig");
 const limits = @import("limits.zig");
 
+pub const Error = @import("errors.zig").ManifestError;
+
 pub const MANIFEST_MAGIC: [8]u8 = .{ 'F', 'T', 'S', 'M', 'N', 'F', '0', '1' };
 pub const MANIFEST_VERSION: u32 = 1;
 

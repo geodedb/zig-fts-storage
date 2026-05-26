@@ -6,6 +6,8 @@ const Allocator = std.mem.Allocator;
 const utils = @import("utils.zig");
 const limits = @import("limits.zig");
 
+pub const Error = @import("errors.zig").SegmentError;
+
 // ============================================================================
 // Memtable (In-Memory Staging)
 // ============================================================================

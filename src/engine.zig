@@ -9,6 +9,8 @@ const wal = @import("wal.zig");
 const segment = @import("segment.zig");
 const limits = @import("limits.zig");
 
+pub const Error = @import("errors.zig").EngineError;
+
 pub const TermPosting = struct {
     term: []const u8,
     positions: []const u32,

@@ -5,6 +5,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const utils = @import("utils.zig");
 
+pub const Error = @import("errors.zig").WalError;
+
 pub const WalRecordType = enum(u8) {
     begin = 1,
     commit = 2,
