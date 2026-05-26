@@ -51,10 +51,18 @@ pub const Engine = struct {
         engine.wal_dir = try base_dir.openDir(io, "wal", .{});
         engine.seg_dir = try base_dir.openDir(io, "segments", .{});
 
-        // Load Manifest A/B
-        const man_a = loadManifest(io, allocator, base_dir, "manifest.a") catch null;
-        const man_b = loadManifest(io, allocator, base_dir, "manifest.b") catch null;
-        engine.current_manifest = manifest.Manifest.selectManifest(man_a, man_b) catch manifest.Manifest{};
+        // Load Manifest A/B. Distinguish between "absent" (FileNotFound) and
+        // "corrupt" (any other deserialize failure). A present-but-corrupt
+        // manifest must fail closed rather than silently start fresh, which
+        // would silently lose every previously flushed segment.
+        const man_a = try loadManifestOptional(io, allocator, base_dir, "manifest.a");
+        const man_b = try loadManifestOptional(io, allocator, base_dir, "manifest.b");
+
+        if (man_a == null and man_b == null) {
+            engine.current_manifest = manifest.Manifest{};
+        } else {
+            engine.current_manifest = try manifest.Manifest.selectManifest(man_a, man_b);
+        }
 
         // Deinit whichever manifest was not selected
         if (man_a) |m| {
@@ -117,6 +125,29 @@ pub const Engine = struct {
         var iov = [_][]u8{data};
         _ = try file.readStreaming(io, &iov);
         return try manifest.Manifest.deserialize(allocator, data);
+    }
+
+    /// Returns null only for FileNotFound. Any other error (checksum mismatch,
+    /// invalid magic, truncated payload, oversize manifest) is mapped to
+    /// error.ManifestCorrupt so a present-but-corrupt manifest fails closed
+    /// instead of being silently treated as "no manifest" (QUAL-0004,
+    /// SEC-EXT-0305).
+    fn loadManifestOptional(
+        io: std.Io,
+        allocator: Allocator,
+        dir: std.Io.Dir,
+        path: []const u8,
+    ) !?manifest.Manifest {
+        return loadManifest(io, allocator, dir, path) catch |err| switch (err) {
+            error.FileNotFound => null,
+            error.ChecksumMismatch,
+            error.InvalidData,
+            error.InvalidMagic,
+            error.ManifestTooLarge,
+            error.SegmentCountTooLarge,
+            => error.ManifestCorrupt,
+            else => |e| e,
+        };
     }
 
     fn replayWal(self: *Engine) !void {
