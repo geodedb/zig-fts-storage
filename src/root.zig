@@ -52,6 +52,7 @@ pub const segment = @import("segment.zig");
 pub const utils = @import("utils.zig");
 pub const engine = @import("engine.zig");
 pub const search = @import("search.zig");
+pub const limits = @import("limits.zig");
 
 // ============================================================================
 // Public API surface — the real engine entry points

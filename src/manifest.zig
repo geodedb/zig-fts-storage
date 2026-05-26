@@ -4,6 +4,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const utils = @import("utils.zig");
+const limits = @import("limits.zig");
 
 pub const MANIFEST_MAGIC: [8]u8 = .{ 'F', 'T', 'S', 'M', 'N', 'F', '0', '1' };
 pub const MANIFEST_VERSION: u32 = 1;
@@ -57,6 +58,7 @@ pub const Manifest = struct {
     pub fn deserialize(allocator: Allocator, data: []const u8) !Manifest {
         const min_size = 8 + 4 + 8 + 8 + 8 + 4 + 4 + 4;
         if (data.len < min_size) return error.InvalidData;
+        if (data.len > limits.MAX_MANIFEST_BYTES) return error.ManifestTooLarge;
         if (!std.mem.eql(u8, data[0..8], &MANIFEST_MAGIC)) return error.InvalidMagic;
 
         const stored_crc = readU32NoAdvance(data, data.len - 4);
@@ -72,7 +74,8 @@ pub const Manifest = struct {
         m.avg_doc_len = readU32(data, &pos);
         const count = readU32(data, &pos);
 
-        if (data.len != min_size + count * 24) return error.InvalidData;
+        if (count > limits.MAX_SEGMENTS_PER_MANIFEST) return error.SegmentCountTooLarge;
+        if (data.len != min_size + @as(usize, count) * 24) return error.InvalidData;
 
         try m.segments.ensureTotalCapacity(allocator, count);
         var i: usize = 0;
@@ -169,4 +172,23 @@ test "manifest corrupt data detected (bad CRC)" {
 
     const result = Manifest.deserialize(allocator, data);
     try std.testing.expectError(error.ChecksumMismatch, result);
+}
+
+test "manifest deserialize rejects oversized count" {
+    const allocator = std.testing.allocator;
+    // Craft a manifest header that claims count = MAX_U32 (would allocate ~96 GiB)
+    // Layout: magic(8) + version(4) + counter(8) + lsn(8) + total_docs(8) + avg_doc_len(4) + segment_count(4) + crc(4) = 48 bytes
+    var buf: [48]u8 = undefined;
+    @memcpy(buf[0..8], &MANIFEST_MAGIC);
+    var pos: usize = 8;
+    writeU32(&buf, &pos, MANIFEST_VERSION);
+    writeU64(&buf, &pos, 0); // counter
+    writeU64(&buf, &pos, 0); // lsn
+    writeU64(&buf, &pos, 0); // total_docs
+    writeU32(&buf, &pos, 0); // avg_doc_len
+    writeU32(&buf, &pos, 0xFFFFFFFF); // segment_count -- adversarial
+    const crc = utils.hashCrc32c(buf[0..44]);
+    writeU32(&buf, &pos, crc);
+
+    try std.testing.expectError(error.SegmentCountTooLarge, Manifest.deserialize(allocator, &buf));
 }

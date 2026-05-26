@@ -4,6 +4,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const utils = @import("utils.zig");
+const limits = @import("limits.zig");
 
 // ============================================================================
 // Memtable (In-Memory Staging)
@@ -263,8 +264,11 @@ pub const SegmentReader = struct {
             self.pos += tf_res.bytes_read;
             const tf = tf_res.val;
 
+            if (tf > limits.MAX_POSITIONS_PER_TERM) return error.PositionCountTooLarge;
+            const tf_usize = std.math.cast(usize, tf) orelse return error.PositionCountTooLarge;
+
             self.pos_buf.clearRetainingCapacity();
-            try self.pos_buf.ensureTotalCapacity(self.allocator, @intCast(tf));
+            try self.pos_buf.ensureTotalCapacity(self.allocator, tf_usize);
 
             var last_pos: u32 = 0;
             var i: u64 = 0;
@@ -282,7 +286,9 @@ pub const SegmentReader = struct {
 
     pub fn search(self: *SegmentReader, term: []const u8) !?PostingIterator {
         if (self.dictionary.get(term)) |entry| {
-            const data = try self.allocator.alloc(u8, @intCast(entry.postings_len));
+            if (entry.postings_len > limits.MAX_POSTINGS_BYTES) return error.PostingsTooLarge;
+            const postings_len_usize = std.math.cast(usize, entry.postings_len) orelse return error.PostingsTooLarge;
+            const data = try self.allocator.alloc(u8, postings_len_usize);
             var seg_dir_name_buf: [64]u8 = undefined;
             const seg_dir_name = try std.fmt.bufPrint(&seg_dir_name_buf, "seg_{d}", .{self.segment_id});
             var seg_dir = try self.dir.openDir(self.io, seg_dir_name, .{});
@@ -346,6 +352,7 @@ pub const SegmentReader = struct {
             defer file.close(self.io);
 
             const count = readU32(file, self.io) catch 0;
+            if (count > limits.MAX_TERMS_PER_SEGMENT) return error.TermCountTooLarge;
             try self.dictionary.ensureTotalCapacity(self.allocator, count);
 
             var i: usize = 0;
@@ -376,6 +383,7 @@ pub const SegmentReader = struct {
         if (seg_dir.openFile(self.io, "tombstones.bin", .{})) |file| {
             defer file.close(self.io);
             const count = readU32(file, self.io) catch 0;
+            if (count > limits.MAX_TOMBSTONES_PER_SEGMENT) return error.TombstoneCountTooLarge;
             try self.tombstones.ensureTotalCapacity(self.allocator, count);
 
             var i: usize = 0;

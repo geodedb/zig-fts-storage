@@ -7,6 +7,7 @@ const utils = @import("utils.zig");
 const manifest = @import("manifest.zig");
 const wal = @import("wal.zig");
 const segment = @import("segment.zig");
+const limits = @import("limits.zig");
 
 pub const TermPosting = struct {
     term: []const u8,
@@ -109,7 +110,9 @@ pub const Engine = struct {
         const file = try dir.openFile(io, path, .{});
         defer file.close(io);
         const stat = try file.stat(io);
-        const data = try allocator.alloc(u8, @intCast(stat.size));
+        if (stat.size > limits.MAX_MANIFEST_BYTES) return error.ManifestTooLarge;
+        const size_usize = std.math.cast(usize, stat.size) orelse return error.ManifestTooLarge;
+        const data = try allocator.alloc(u8, size_usize);
         defer allocator.free(data);
         var iov = [_][]u8{data};
         _ = try file.readStreaming(io, &iov);
@@ -167,13 +170,16 @@ pub const Engine = struct {
             const num_pos = std.mem.readInt(u16, payload[pos..][0..2], .little);
             pos += 2;
 
+            if (num_pos > limits.MAX_POSITIONS_PER_TERM) return error.PositionCountTooLarge;
+
             pos_buf.clearRetainingCapacity();
             try pos_buf.ensureTotalCapacity(self.allocator, num_pos);
 
             var i: u16 = 0;
             while (i < num_pos) : (i += 1) {
                 const res = try utils.readVarInt(payload[pos..]);
-                pos_buf.appendAssumeCapacity(@intCast(res.val));
+                const pos_value = std.math.cast(u32, res.val) orelse return error.PositionOutOfRange;
+                pos_buf.appendAssumeCapacity(pos_value);
                 pos += res.bytes_read;
             }
 
