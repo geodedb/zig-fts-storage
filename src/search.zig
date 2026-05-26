@@ -5,6 +5,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const engine = @import("engine.zig");
 const segment = @import("segment.zig");
+const limits = @import("limits.zig");
 
 pub const TermIterator = struct {
     eng: *engine.Engine,
@@ -24,6 +25,10 @@ pub const TermIterator = struct {
     };
 
     pub fn init(allocator: Allocator, eng: *engine.Engine, term: []const u8) !TermIterator {
+        // Validate inputs at the API boundary (SEC-EXT-0101, 0102).
+        if (term.len == 0) return error.EmptyTerm;
+        if (term.len > limits.MAX_TERM_LEN) return error.TermTooLong;
+
         var seg_iters: std.ArrayListUnmanaged(segment.SegmentReader.PostingIterator) = .empty;
         errdefer {
             for (seg_iters.items) |*iter| iter.deinit();

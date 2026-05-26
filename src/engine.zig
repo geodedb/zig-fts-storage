@@ -188,6 +188,18 @@ pub const Engine = struct {
     }
 
     pub fn indexDocument(self: *Engine, doc_id: u64, terms: []const TermPosting) !void {
+        // Validate inputs at the API boundary before any side effects
+        // (SEC-EXT-0101, 0102, 0103, 0104, 0105, 0107, 0205, 0208).
+        for (terms) |t| {
+            if (t.term.len == 0) return error.EmptyTerm;
+            if (t.term.len > limits.MAX_TERM_LEN) return error.TermTooLong;
+            if (t.positions.len > limits.MAX_POSITIONS_PER_TERM) return error.PositionCountTooLarge;
+            var i: usize = 1;
+            while (i < t.positions.len) : (i += 1) {
+                if (t.positions[i] < t.positions[i - 1]) return error.PositionsNotMonotonic;
+            }
+        }
+
         const txn_id = self.next_txn_id;
         self.next_txn_id += 1;
 
@@ -197,11 +209,13 @@ pub const Engine = struct {
 
         var num_buf: [4]u8 = undefined;
         for (terms) |t| {
-            std.mem.writeInt(u16, num_buf[0..2], @intCast(t.term.len), .little);
+            const term_len_u16 = std.math.cast(u16, t.term.len) orelse return error.TermTooLong;
+            std.mem.writeInt(u16, num_buf[0..2], term_len_u16, .little);
             try payload_list.appendSlice(self.allocator, num_buf[0..2]);
             try payload_list.appendSlice(self.allocator, t.term);
 
-            std.mem.writeInt(u16, num_buf[0..2], @intCast(t.positions.len), .little);
+            const pos_len_u16 = std.math.cast(u16, t.positions.len) orelse return error.PositionCountTooLarge;
+            std.mem.writeInt(u16, num_buf[0..2], pos_len_u16, .little);
             try payload_list.appendSlice(self.allocator, num_buf[0..2]);
 
             for (t.positions) |p| {
