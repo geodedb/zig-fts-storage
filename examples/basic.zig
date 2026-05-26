@@ -7,28 +7,32 @@
 
 const std = @import("std");
 const Io = std.Io;
-const lib = @import("fts_storage");
+const fts = @import("fts_storage");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
+    const allocator = init.arena.allocator();
 
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = Io.File.stdout().writer(io, &stdout_buffer);
     const out = &stdout_writer.interface;
 
-    try out.print("fts-storage Example (v{s})\n", .{lib.version});
+    try out.print("fts-storage Example (v{s})\n", .{fts.version});
     try out.writeAll("========================\n\n");
 
-    const config = lib.Config{
-        .debug = true,
-        .max_retries = 5,
-        .timeout_ms = 10_000,
-    };
-    try lib.init(config);
+    var dir = try Io.Dir.cwd().createDirPathOpen(io, "example-data", .{});
+    defer dir.close(io);
+
+    var engine = try fts.Engine.init(io, allocator, dir);
+    defer engine.deinit();
+
+    const t = fts.TermPosting{ .term = "hello", .positions = &[_]u32{ 1, 5 } };
+    try engine.indexDocument(42, &[_]fts.TermPosting{t});
+    try engine.flush();
 
     try out.print(
-        "Initialised with debug={}, max_retries={d}, timeout_ms={d}.\n",
-        .{ config.debug, config.max_retries, config.timeout_ms },
+        "indexed doc 42; manifest_counter={d}, segments={d}\n",
+        .{ engine.current_manifest.counter, engine.segments.items.len },
     );
     try out.writeAll("Example completed successfully!\n");
     try out.flush();
