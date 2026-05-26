@@ -8,6 +8,8 @@ const utils = @import("utils.zig");
 pub const Error = @import("errors.zig").WalError;
 
 pub const WalRecordType = enum(u8) {
+    // Reserved: future transactional bracketing (see WRK-025 / GAP-0012, GAP-0013).
+    // Today these are accepted on read for forward compat but never emitted by Engine.
     begin = 1,
     commit = 2,
     index_doc = 3,
