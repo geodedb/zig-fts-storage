@@ -318,11 +318,17 @@ pub const Engine = struct {
 
         try writer.writeMemtable(&self.memtable);
 
-        // Add to manifest
+        // Add to manifest. created_lsn carries the last txn that contributed
+        // to this segment so downstream consumers can order segments by
+        // sealing LSN (QUAL-0014, WRK-018). level=0 marks a freshly flushed
+        // memtable; non-zero levels are reserved for future tiered
+        // compaction (WRK-041).
         try self.current_manifest.segments.append(self.allocator, .{
             .id = next_segment_id,
             .doc_count = self.memtable.total_docs,
             .tombstone_count = self.memtable.tombstones.count(),
+            .created_lsn = self.next_txn_id - 1,
+            .level = 0,
         });
 
         // Plumb running totals up to the manifest (QUAL-0006, DC-2, DC-3,

@@ -9,12 +9,18 @@ const limits = @import("limits.zig");
 pub const Error = @import("errors.zig").ManifestError;
 
 pub const MANIFEST_MAGIC: [8]u8 = .{ 'F', 'T', 'S', 'M', 'N', 'F', '0', '1' };
-pub const MANIFEST_VERSION: u32 = 1;
+pub const MANIFEST_VERSION: u32 = 2;
 
 pub const SegmentEntry = struct {
     id: u64,
     doc_count: u64,
     tombstone_count: u64,
+    /// LSN at the time this segment was sealed.
+    created_lsn: u64 = 0,
+    /// Compaction level (0 = flushed memtable; >0 reserved for WRK-041).
+    level: u8 = 0,
+    /// Padding for fixed serialized size.
+    _reserved: [7]u8 = .{0} ** 7,
 };
 
 pub const Manifest = struct {
@@ -30,9 +36,14 @@ pub const Manifest = struct {
     }
 
     pub fn serialize(self: *const @This(), allocator: Allocator) ![]u8 {
-        // magic(8) + version(4) + counter(8) + lsn(8) + total_docs(8) + avg_doc_len(4) + segment_count(4) + segments(24 * count) + crc(4)
+        // v2 layout (QUAL-0014):
+        //   magic(8) + version(4) + counter(8) + lsn(8) + total_docs(8)
+        // + avg_doc_len(4) + segment_count(4)
+        // + segments(40 * count: id(8)+doc_count(8)+tombstone_count(8)
+        //                       +created_lsn(8)+level(1)+_reserved(7))
+        // + crc(4)
         const header_size = 8 + 4 + 8 + 8 + 8 + 4 + 4;
-        const total_size = header_size + (self.segments.items.len * 24) + 4;
+        const total_size = header_size + (self.segments.items.len * 40) + 4;
         const buf = try allocator.alloc(u8, total_size);
         errdefer allocator.free(buf);
         var pos: usize = 0;
@@ -50,6 +61,11 @@ pub const Manifest = struct {
             writeU64(buf, &pos, seg.id);
             writeU64(buf, &pos, seg.doc_count);
             writeU64(buf, &pos, seg.tombstone_count);
+            writeU64(buf, &pos, seg.created_lsn);
+            buf[pos] = seg.level;
+            pos += 1;
+            @memcpy(buf[pos..][0..7], &seg._reserved);
+            pos += 7;
         }
 
         const crc = utils.hashCrc32c(buf[0..pos]);
@@ -77,15 +93,27 @@ pub const Manifest = struct {
         const count = readU32(data, &pos);
 
         if (count > limits.MAX_SEGMENTS_PER_MANIFEST) return error.SegmentCountTooLarge;
-        if (data.len != min_size + @as(usize, count) * 24) return error.InvalidData;
+        if (data.len != min_size + @as(usize, count) * 40) return error.InvalidData;
 
         try m.segments.ensureTotalCapacity(allocator, count);
         var i: usize = 0;
         while (i < count) : (i += 1) {
+            const id = readU64(data, &pos);
+            const doc_count = readU64(data, &pos);
+            const tombstone_count = readU64(data, &pos);
+            const created_lsn = readU64(data, &pos);
+            const level = data[pos];
+            pos += 1;
+            var reserved: [7]u8 = undefined;
+            @memcpy(&reserved, data[pos..][0..7]);
+            pos += 7;
             m.segments.appendAssumeCapacity(.{
-                .id = readU64(data, &pos),
-                .doc_count = readU64(data, &pos),
-                .tombstone_count = readU64(data, &pos),
+                .id = id,
+                .doc_count = doc_count,
+                .tombstone_count = tombstone_count,
+                .created_lsn = created_lsn,
+                .level = level,
+                ._reserved = reserved,
             });
         }
         return m;
@@ -144,8 +172,20 @@ test "manifest serialize/deserialize round-trip" {
         .total_docs = 500,
         .avg_doc_len = 10,
     };
-    try m.segments.append(allocator, .{ .id = 1, .doc_count = 100, .tombstone_count = 5 });
-    try m.segments.append(allocator, .{ .id = 2, .doc_count = 200, .tombstone_count = 0 });
+    try m.segments.append(allocator, .{
+        .id = 1,
+        .doc_count = 100,
+        .tombstone_count = 5,
+        .created_lsn = 999,
+        .level = 0,
+    });
+    try m.segments.append(allocator, .{
+        .id = 2,
+        .doc_count = 200,
+        .tombstone_count = 0,
+        .created_lsn = 1500,
+        .level = 1,
+    });
     defer m.deinit(allocator);
 
     const data = try m.serialize(allocator);
@@ -161,6 +201,11 @@ test "manifest serialize/deserialize round-trip" {
     try std.testing.expectEqual(m.segments.items.len, m2.segments.items.len);
     try std.testing.expectEqual(m.segments.items[0].id, m2.segments.items[0].id);
     try std.testing.expectEqual(m.segments.items[1].tombstone_count, m2.segments.items[1].tombstone_count);
+    // SegmentEntry ordering metadata (WRK-018, QUAL-0014) round-trips.
+    try std.testing.expectEqual(@as(u64, 999), m2.segments.items[0].created_lsn);
+    try std.testing.expectEqual(@as(u64, 1500), m2.segments.items[1].created_lsn);
+    try std.testing.expectEqual(@as(u8, 0), m2.segments.items[0].level);
+    try std.testing.expectEqual(@as(u8, 1), m2.segments.items[1].level);
 }
 
 test "manifest corrupt data detected (bad CRC)" {
