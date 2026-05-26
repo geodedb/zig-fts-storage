@@ -119,8 +119,8 @@ pub const SegmentWriter = struct {
         var seg_dir_name_buf: [64]u8 = undefined;
         const seg_dir_name = try std.fmt.bufPrint(&seg_dir_name_buf, "seg_{d}", .{self.segment_id});
 
-        // Create segment directory
-        self.dir.createDir(self.io, seg_dir_name, .default_dir) catch |err| {
+        // Create segment directory with owner-only perms (SEC-09, SEC-EXT-0302).
+        self.dir.createDir(self.io, seg_dir_name, utils.dirMode(0o700)) catch |err| {
             if (err != error.PathAlreadyExists) return err;
         };
 
@@ -133,10 +133,10 @@ pub const SegmentWriter = struct {
 
     fn writeDictionaryAndPostings(self: *SegmentWriter, seg_dir: *std.Io.Dir, memtable: *Memtable) !void {
         // We will write `terms.fst` (a flat hash map for now) and `postings.bin`.
-        const dict_file = try seg_dir.createFile(self.io, "terms.hash", .{});
+        const dict_file = try seg_dir.createFile(self.io, "terms.hash", .{ .permissions = utils.fileMode(0o600) });
         defer dict_file.close(self.io);
 
-        const post_file = try seg_dir.createFile(self.io, "postings.bin", .{});
+        const post_file = try seg_dir.createFile(self.io, "postings.bin", .{ .permissions = utils.fileMode(0o600) });
         defer post_file.close(self.io);
 
         // We use explicit buffers for std.mem.writeInt instead of writer.writeInt
@@ -202,7 +202,7 @@ pub const SegmentWriter = struct {
     fn writeTombstones(self: *SegmentWriter, seg_dir: *std.Io.Dir, memtable: *Memtable) !void {
         if (memtable.tombstones.count() == 0) return;
 
-        const ts_file = try seg_dir.createFile(self.io, "tombstones.bin", .{});
+        const ts_file = try seg_dir.createFile(self.io, "tombstones.bin", .{ .permissions = utils.fileMode(0o600) });
         defer ts_file.close(self.io);
 
         var num_buf: [8]u8 = undefined;

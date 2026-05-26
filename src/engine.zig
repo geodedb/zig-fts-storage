@@ -48,11 +48,14 @@ pub const Engine = struct {
         engine.memtable = segment.Memtable.init(allocator);
         engine.segments = .empty;
 
-        // Ensure subdirectories exist
-        base_dir.createDir(io, "wal", .default_dir) catch |err| {
+        // Ensure subdirectories exist. Dir mode 0o700 (owner-only) keeps the
+        // WAL and segment data unreadable to other local users on POSIX
+        // systems (SEC-09, SEC-EXT-0302). On platforms where `Permissions` is
+        // a zero-sized enum (Windows, WASI) this collapses to default_dir.
+        base_dir.createDir(io, "wal", utils.dirMode(0o700)) catch |err| {
             if (err != error.PathAlreadyExists) return err;
         };
-        base_dir.createDir(io, "segments", .default_dir) catch |err| {
+        base_dir.createDir(io, "segments", utils.dirMode(0o700)) catch |err| {
             if (err != error.PathAlreadyExists) return err;
         };
 
@@ -99,7 +102,10 @@ pub const Engine = struct {
         try engine.replayWal();
 
         // Open WAL for writing
-        engine.wal_file = try engine.wal_dir.createFile(io, "fts.wal", .{ .truncate = false });
+        engine.wal_file = try engine.wal_dir.createFile(io, "fts.wal", .{
+            .truncate = false,
+            .permissions = utils.fileMode(0o600),
+        });
         engine.wal_writer = try wal.WalWriter.init(io, engine.wal_file, allocator);
 
         return engine;
@@ -335,7 +341,10 @@ pub const Engine = struct {
 
         // Truncate WAL
         self.wal_file.close(self.io);
-        self.wal_file = try self.wal_dir.createFile(self.io, "fts.wal", .{ .truncate = true });
+        self.wal_file = try self.wal_dir.createFile(self.io, "fts.wal", .{
+            .truncate = true,
+            .permissions = utils.fileMode(0o600),
+        });
         self.wal_writer = try wal.WalWriter.init(self.io, self.wal_file, self.allocator);
 
         // Open SegmentReader and add to segments list

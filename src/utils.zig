@@ -3,6 +3,27 @@
 
 const std = @import("std");
 
+/// Returns a `std.Io.File.Permissions` (which is structurally the same as
+/// `std.Io.Dir.Permissions`) carrying the requested POSIX mode bits on
+/// POSIX platforms, or `.default_file` on platforms whose `Permissions`
+/// is a zero-sized enum (Windows/WASI). Used by `Engine` to set 0o700 on
+/// data subdirectories and 0o600 on sensitive files (SEC-09, SEC-EXT-0302).
+pub fn fileMode(mode: u32) std.Io.File.Permissions {
+    if (@typeInfo(std.posix.mode_t) == .int) {
+        return std.Io.File.Permissions.fromMode(@intCast(mode));
+    }
+    return .default_file;
+}
+
+/// Variant of `fileMode` for directory creation. Falls back to
+/// `.default_dir` on platforms whose `Permissions` is zero-sized.
+pub fn dirMode(mode: u32) std.Io.Dir.Permissions {
+    if (@typeInfo(std.posix.mode_t) == .int) {
+        return std.Io.Dir.Permissions.fromMode(@intCast(mode));
+    }
+    return .default_dir;
+}
+
 /// LEB128 decoding from a byte slice. Returns the value and bytes read.
 pub fn readVarInt(buf: []const u8) !struct { val: u64, bytes_read: usize } {
     var result: u64 = 0;
@@ -75,8 +96,12 @@ pub fn atomicWrite(io: std.Io, dir: std.Io.Dir, path: []const u8, data: []const 
         .{ path, hex_buf[0..] },
     );
 
-    // O_EXCL: fail if a file at tmp_path somehow already exists.
-    const file = try dir.createFile(io, tmp_path, .{ .exclusive = true });
+    // O_EXCL: fail if a file at tmp_path somehow already exists. 0o600
+    // keeps the manifest tmp unreadable to other local users (SEC-09).
+    const file = try dir.createFile(io, tmp_path, .{
+        .exclusive = true,
+        .permissions = fileMode(0o600),
+    });
     var closed = false;
     errdefer if (!closed) file.close(io);
     errdefer dir.deleteFile(io, tmp_path) catch {};
