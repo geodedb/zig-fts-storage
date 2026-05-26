@@ -26,8 +26,8 @@ pub const Engine = struct {
     memtable: segment.Memtable,
     segments: std.ArrayListUnmanaged(segment.SegmentReader),
 
-    wal_file: ?std.Io.File = null,
-    wal_writer: ?wal.WalWriter = null,
+    wal_file: std.Io.File,
+    wal_writer: wal.WalWriter,
     next_txn_id: u64 = 1,
 
     pub fn init(io: std.Io, allocator: Allocator, base_dir: std.Io.Dir) !*Engine {
@@ -92,15 +92,13 @@ pub const Engine = struct {
 
         // Open WAL for writing
         engine.wal_file = try engine.wal_dir.createFile(io, "fts.wal", .{ .truncate = false });
-        engine.wal_writer = try wal.WalWriter.init(io, engine.wal_file.?, allocator);
+        engine.wal_writer = try wal.WalWriter.init(io, engine.wal_file, allocator);
 
         return engine;
     }
 
     pub fn deinit(self: *Engine) void {
-        if (self.wal_file) |*file| {
-            file.close(self.io);
-        }
+        self.wal_file.close(self.io);
         self.wal_dir.close(self.io);
 
         for (self.segments.items) |*seg_reader| {
@@ -265,8 +263,8 @@ pub const Engine = struct {
         // WAL first — durable before in-memory mutation. If WAL append/sync
         // fails the memtable stays untouched and the next flush cannot diverge
         // from the durable log (QUAL-0007).
-        try self.wal_writer.?.append(rec);
-        try self.wal_writer.?.sync();
+        try self.wal_writer.append(rec);
+        try self.wal_writer.sync();
 
         // Only mutate memtable after WAL is durable. Bump next_txn_id last so
         // a partial failure does not consume a txn id.
@@ -288,8 +286,8 @@ pub const Engine = struct {
             .doc_id = doc_id,
         };
 
-        try self.wal_writer.?.append(rec);
-        try self.wal_writer.?.sync();
+        try self.wal_writer.append(rec);
+        try self.wal_writer.sync();
     }
 
     pub fn flush(self: *Engine) !void {
@@ -328,11 +326,9 @@ pub const Engine = struct {
         try self.current_manifest.writeToFile(self.io, self.dir, man_file, self.allocator);
 
         // Truncate WAL
-        if (self.wal_file) |*f| {
-            f.close(self.io);
-        }
+        self.wal_file.close(self.io);
         self.wal_file = try self.wal_dir.createFile(self.io, "fts.wal", .{ .truncate = true });
-        self.wal_writer = try wal.WalWriter.init(self.io, self.wal_file.?, self.allocator);
+        self.wal_writer = try wal.WalWriter.init(self.io, self.wal_file, self.allocator);
 
         // Open SegmentReader and add to segments list
         const seg_reader = try segment.SegmentReader.init(self.io, self.allocator, self.seg_dir, next_segment_id);
