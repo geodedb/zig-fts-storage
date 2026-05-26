@@ -48,17 +48,44 @@ pub fn hashCrc32c(data: []const u8) u32 {
 }
 
 /// Performs an atomic file swap by writing to a temp file, fsyncing, and renaming.
+///
+/// Hardening (QUAL-0010, PERF-0013, SEC-EXT-0303):
+/// - Tmp filename includes 8 random bytes of entropy so concurrent writers
+///   and stale tmps from prior crashes never collide.
+/// - Tmp is created with `O_EXCL` (`exclusive = true`) so we never clobber
+///   an existing file we don't own.
+/// - `errdefer` removes the tmp on any failure before rename completes.
+/// - Rename is the durability point; we do not attempt a parent-dir fsync
+///   because `std.Io.Dir` does not expose one in Zig 0.16.
 pub fn atomicWrite(io: std.Io, dir: std.Io.Dir, path: []const u8, data: []const u8) !void {
-    var tmp_path_buf: [4096]u8 = undefined;
-    const tmp_path = try std.fmt.bufPrint(&tmp_path_buf, "{s}.tmp", .{path});
+    var rand_bytes: [8]u8 = undefined;
+    io.random(&rand_bytes);
 
-    // Write to tmp file
-    const file = try dir.createFile(io, tmp_path, .{});
-    defer file.close(io);
+    var tmp_path_buf: [4096]u8 = undefined;
+    // Hand-format hex (Zig 0.16 has no std.fmt.fmtSliceHexLower).
+    const hex_chars = "0123456789abcdef";
+    var hex_buf: [16]u8 = undefined;
+    for (rand_bytes, 0..) |b, i| {
+        hex_buf[i * 2] = hex_chars[b >> 4];
+        hex_buf[i * 2 + 1] = hex_chars[b & 0x0f];
+    }
+    const tmp_path = try std.fmt.bufPrint(
+        &tmp_path_buf,
+        "{s}.{s}.tmp",
+        .{ path, hex_buf[0..] },
+    );
+
+    // O_EXCL: fail if a file at tmp_path somehow already exists.
+    const file = try dir.createFile(io, tmp_path, .{ .exclusive = true });
+    var closed = false;
+    errdefer if (!closed) file.close(io);
+    errdefer dir.deleteFile(io, tmp_path) catch {};
+
     try file.writeStreamingAll(io, data);
     try file.sync(io);
+    file.close(io);
+    closed = true;
 
-    // Rename to target (atomic)
     try dir.rename(tmp_path, dir, path, io);
 }
 
@@ -89,4 +116,28 @@ test "hashCrc32c" {
     const hash = hashCrc32c("test");
     // Crc32Iscsi of "test"
     try std.testing.expectEqual(@as(u32, 2258662080), hash);
+}
+
+test "atomicWrite cleans up tmp on rename failure" {
+    var tmp_dir = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // Force rename to fail by creating "target" as a directory.
+    try tmp_dir.dir.createDir(io, "target", .default_dir);
+
+    const result = atomicWrite(io, tmp_dir.dir, "target", "hello");
+    try std.testing.expectError(error.IsDir, result);
+
+    // Confirm errdefer cleaned up the tmp file so no leftover ".tmp" remains.
+    var iter = tmp_dir.dir.iterate();
+    var found_tmp = false;
+    while (try iter.next(io)) |entry| {
+        if (std.mem.startsWith(u8, entry.name, "target.") and
+            std.mem.endsWith(u8, entry.name, ".tmp"))
+        {
+            found_tmp = true;
+        }
+    }
+    try std.testing.expect(!found_tmp);
 }
