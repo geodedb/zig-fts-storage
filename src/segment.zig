@@ -27,6 +27,9 @@ pub const Memtable = struct {
     allocator: Allocator,
     dictionary: std.StringHashMapUnmanaged(MemPostingsList),
     tombstones: std.AutoHashMapUnmanaged(u64, void),
+    /// Tracks unique doc_ids ever observed by addPosting, so total_docs counts
+    /// distinct documents rather than (doc, term) postings (QUAL-0006).
+    seen_docs: std.AutoHashMapUnmanaged(u64, void),
     total_docs: u64,
 
     pub fn init(allocator: Allocator) Memtable {
@@ -34,6 +37,7 @@ pub const Memtable = struct {
             .allocator = allocator,
             .dictionary = .empty,
             .tombstones = .empty,
+            .seen_docs = .empty,
             .total_docs = 0,
         };
     }
@@ -51,6 +55,7 @@ pub const Memtable = struct {
         }
         self.dictionary.deinit(self.allocator);
         self.tombstones.deinit(self.allocator);
+        self.seen_docs.deinit(self.allocator);
     }
 
     pub fn addTombstone(self: *Memtable, doc_id: u64) !void {
@@ -58,6 +63,16 @@ pub const Memtable = struct {
     }
 
     pub fn addPosting(self: *Memtable, term: []const u8, doc_id: u64, positions: []const u32) !void {
+        // Track unique doc ids so total_docs reflects distinct documents
+        // (QUAL-0006). Do this before the dictionary mutation so a later
+        // failure leaves seen_docs over-counted only for *this* call, not for
+        // sibling terms in the same indexDocument batch — the engine treats a
+        // failure mid-batch as poisoning the engine anyway.
+        const gop_doc = try self.seen_docs.getOrPut(self.allocator, doc_id);
+        if (!gop_doc.found_existing) {
+            self.total_docs += 1;
+        }
+
         var entry = try self.dictionary.getOrPut(self.allocator, term);
         if (!entry.found_existing) {
             // Dup the string to own it. Guard against partial init: if any

@@ -39,10 +39,9 @@ test "integration: index, flush, reopen, and recover from manifest" {
         var eng = try fts.Engine.init(io, alloc, tmp_dir.dir);
         defer eng.deinit();
         try std.testing.expectEqual(@as(usize, 1), eng.segments.items.len);
-        // NOTE: Engine.flush() currently does not increment
-        // current_manifest.total_docs (WRK-016 deferred). Assert on the
-        // segment-count side instead.
         try std.testing.expectEqual(@as(u64, 1), eng.current_manifest.counter);
+        // WRK-016: total_docs is now plumbed through flush.
+        try std.testing.expectEqual(@as(u64, docs.len), eng.current_manifest.total_docs);
     }
 }
 
@@ -91,4 +90,24 @@ test "integration: input validation rejects garbage at API boundary" {
 
 test "integration: version is defined" {
     try std.testing.expect(fts.version.len > 0);
+}
+
+test "flush populates manifest total_docs and segment doc_count" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var eng = try fts.Engine.init(io, alloc, tmp_dir.dir);
+    defer eng.deinit();
+
+    const t = fts.TermPosting{ .term = "x", .positions = &[_]u32{1} };
+    try eng.indexDocument(1, &[_]fts.TermPosting{t});
+    try eng.indexDocument(2, &[_]fts.TermPosting{t});
+    try eng.indexDocument(3, &[_]fts.TermPosting{t});
+
+    try eng.flush();
+
+    try std.testing.expectEqual(@as(u64, 3), eng.current_manifest.total_docs);
+    try std.testing.expectEqual(@as(u64, 3), eng.current_manifest.segments.items[0].doc_count);
 }

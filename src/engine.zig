@@ -313,6 +313,13 @@ pub const Engine = struct {
             .tombstone_count = self.memtable.tombstones.count(),
         });
 
+        // Plumb running totals up to the manifest (QUAL-0006, DC-2, DC-3,
+        // GAP-0007). avg_doc_len is intentionally left at zero here; the
+        // length-weighted aggregation is deferred to WRK-035 (BM25 length
+        // normalization) which needs per-doc length tracking the memtable
+        // does not yet capture.
+        self.current_manifest.total_docs += self.memtable.total_docs;
+
         self.current_manifest.counter += 1;
         self.current_manifest.last_checkpoint_lsn = self.next_txn_id - 1;
 
