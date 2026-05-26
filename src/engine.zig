@@ -30,6 +30,12 @@ pub const Engine = struct {
     wal_writer: wal.WalWriter,
     next_txn_id: u64 = 1,
 
+    /// Initialize an Engine on the given directory.
+    ///
+    /// Ownership: the caller retains ownership of `base_dir`. Engine will open
+    /// (and close on deinit) the `wal/` and `segments/` subdirs of `base_dir`,
+    /// but will NOT close `base_dir` itself. The caller must `base_dir.close(io)`
+    /// after `Engine.deinit`.
     pub fn init(io: std.Io, allocator: Allocator, base_dir: std.Io.Dir) !*Engine {
         var engine = try allocator.create(Engine);
         errdefer allocator.destroy(engine);
