@@ -3,21 +3,37 @@
 
 //! # fts-storage
 //!
-//! A Zig library for fts-storage
+//! A pure-Zig append-only inverted-index storage engine.
 //!
-//! ## Features
+//! ## Capabilities
 //!
-//! - Feature 1
-//! - Feature 2
-//! - Feature 3
+//! - Append-only WAL with CRC32C-checked records (`wal.zig`)
+//! - A/B atomic manifest with monotonic counter (`manifest.zig`)
+//! - LSM-style immutable segments with delta+varint postings (`segment.zig`)
+//! - Tombstone-based deletes (`segment.zig`, `search.zig`)
+//! - Crash recovery via WAL replay (`engine.zig`)
 //!
 //! ## Quick Start
 //!
 //! ```zig
-//! const fts_storage = @import("fts_storage");
+//! const std = @import("std");
+//! const fts = @import("fts_storage");
 //!
 //! pub fn main() !void {
-//!     try fts_storage.init(.{});
+//!     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
+//!     defer _ = gpa.deinit();
+//!     const allocator = gpa.allocator();
+//!
+//!     var dir = try std.fs.cwd().makeOpenPath("data", .{});
+//!     defer dir.close();
+//!     const io = std.Io.Threaded.global_single_threaded.io();
+//!
+//!     var engine = try fts.Engine.init(io, allocator, dir);
+//!     defer engine.deinit();
+//!
+//!     const term = fts.TermPosting{ .term = "hello", .positions = &.{1, 5} };
+//!     try engine.indexDocument(42, &.{term});
+//!     try engine.flush();
 //! }
 //! ```
 //!
@@ -38,53 +54,21 @@ pub const engine = @import("engine.zig");
 pub const search = @import("search.zig");
 
 // ============================================================================
-// Public Types
+// Public API surface — the real engine entry points
 // ============================================================================
 
-/// Example configuration structure.
-pub const Config = struct {
-    /// Enable debug output.
-    debug: bool = false,
-    /// Maximum retry attempts.
-    max_retries: u32 = 3,
-    /// Timeout in milliseconds.
-    timeout_ms: u64 = 30_000,
-};
+/// The append-only inverted-index storage engine.
+pub const Engine = engine.Engine;
 
-// ============================================================================
-// Public Functions
-// ============================================================================
+/// A single (term, positions) pair handed to `Engine.indexDocument`.
+pub const TermPosting = engine.TermPosting;
 
-/// Initialize the library with the given configuration.
-///
-/// Returns an error if the configuration is invalid.
-pub fn init(config: Config) !void {
-    if (config.max_retries == 0) return error.InvalidConfig;
-    if (config.timeout_ms == 0) return error.InvalidConfig;
-}
+/// A streaming iterator over (doc_id, positions) matches for a search term.
+pub const TermIterator = search.TermIterator;
 
 // ============================================================================
 // Unit Tests
 // ============================================================================
-
-test "Config default values" {
-    const config = Config{};
-    try std.testing.expectEqual(false, config.debug);
-    try std.testing.expectEqual(@as(u32, 3), config.max_retries);
-    try std.testing.expectEqual(@as(u64, 30_000), config.timeout_ms);
-}
-
-test "init with default config" {
-    try init(.{});
-}
-
-test "init rejects zero max_retries" {
-    try std.testing.expectError(error.InvalidConfig, init(.{ .max_retries = 0 }));
-}
-
-test "init rejects zero timeout" {
-    try std.testing.expectError(error.InvalidConfig, init(.{ .timeout_ms = 0 }));
-}
 
 test {
     std.testing.refAllDecls(@This());
