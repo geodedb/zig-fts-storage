@@ -50,18 +50,18 @@ pub const Manifest = struct {
 
         @memcpy(buf[pos..][0..8], &MANIFEST_MAGIC);
         pos += 8;
-        writeU32(buf, &pos, self.format_version);
-        writeU64(buf, &pos, self.counter);
-        writeU64(buf, &pos, self.last_checkpoint_lsn);
-        writeU64(buf, &pos, self.total_docs);
-        writeU32(buf, &pos, self.avg_doc_len);
-        writeU32(buf, &pos, @intCast(self.segments.items.len));
+        utils.writeU32Le(buf, &pos, self.format_version);
+        utils.writeU64Le(buf, &pos, self.counter);
+        utils.writeU64Le(buf, &pos, self.last_checkpoint_lsn);
+        utils.writeU64Le(buf, &pos, self.total_docs);
+        utils.writeU32Le(buf, &pos, self.avg_doc_len);
+        utils.writeU32Le(buf, &pos, @intCast(self.segments.items.len));
 
         for (self.segments.items) |seg| {
-            writeU64(buf, &pos, seg.id);
-            writeU64(buf, &pos, seg.doc_count);
-            writeU64(buf, &pos, seg.tombstone_count);
-            writeU64(buf, &pos, seg.created_lsn);
+            utils.writeU64Le(buf, &pos, seg.id);
+            utils.writeU64Le(buf, &pos, seg.doc_count);
+            utils.writeU64Le(buf, &pos, seg.tombstone_count);
+            utils.writeU64Le(buf, &pos, seg.created_lsn);
             buf[pos] = seg.level;
             pos += 1;
             @memcpy(buf[pos..][0..7], &seg._reserved);
@@ -69,7 +69,7 @@ pub const Manifest = struct {
         }
 
         const crc = utils.hashCrc32c(buf[0..pos]);
-        writeU32(buf, &pos, crc);
+        utils.writeU32Le(buf, &pos, crc);
         return buf;
     }
 
@@ -79,18 +79,18 @@ pub const Manifest = struct {
         if (data.len > limits.MAX_MANIFEST_BYTES) return error.ManifestTooLarge;
         if (!std.mem.eql(u8, data[0..8], &MANIFEST_MAGIC)) return error.InvalidMagic;
 
-        const stored_crc = readU32NoAdvance(data, data.len - 4);
+        const stored_crc = utils.readU32LeAt(data, data.len - 4);
         const computed_crc = utils.hashCrc32c(data[0 .. data.len - 4]);
         if (stored_crc != computed_crc) return error.ChecksumMismatch;
 
         var pos: usize = 8;
         var m = Manifest{};
-        m.format_version = readU32(data, &pos);
-        m.counter = readU64(data, &pos);
-        m.last_checkpoint_lsn = readU64(data, &pos);
-        m.total_docs = readU64(data, &pos);
-        m.avg_doc_len = readU32(data, &pos);
-        const count = readU32(data, &pos);
+        m.format_version = utils.readU32Le(data, &pos);
+        m.counter = utils.readU64Le(data, &pos);
+        m.last_checkpoint_lsn = utils.readU64Le(data, &pos);
+        m.total_docs = utils.readU64Le(data, &pos);
+        m.avg_doc_len = utils.readU32Le(data, &pos);
+        const count = utils.readU32Le(data, &pos);
 
         if (count > limits.MAX_SEGMENTS_PER_MANIFEST) return error.SegmentCountTooLarge;
         if (data.len != min_size + @as(usize, count) * 40) return error.InvalidData;
@@ -98,10 +98,10 @@ pub const Manifest = struct {
         try m.segments.ensureTotalCapacity(allocator, count);
         var i: usize = 0;
         while (i < count) : (i += 1) {
-            const id = readU64(data, &pos);
-            const doc_count = readU64(data, &pos);
-            const tombstone_count = readU64(data, &pos);
-            const created_lsn = readU64(data, &pos);
+            const id = utils.readU64Le(data, &pos);
+            const doc_count = utils.readU64Le(data, &pos);
+            const tombstone_count = utils.readU64Le(data, &pos);
+            const created_lsn = utils.readU64Le(data, &pos);
             const level = data[pos];
             pos += 1;
             var reserved: [7]u8 = undefined;
@@ -133,32 +133,6 @@ pub const Manifest = struct {
         try utils.atomicWrite(io, dir, path, data);
     }
 };
-
-fn writeU32(buf: []u8, pos: *usize, value: u32) void {
-    @memcpy(buf[pos.*..][0..4], &std.mem.toBytes(std.mem.nativeToLittle(u32, value)));
-    pos.* += 4;
-}
-
-fn writeU64(buf: []u8, pos: *usize, value: u64) void {
-    @memcpy(buf[pos.*..][0..8], &std.mem.toBytes(std.mem.nativeToLittle(u64, value)));
-    pos.* += 8;
-}
-
-fn readU32(data: []const u8, offset: *usize) u32 {
-    const v = std.mem.littleToNative(u32, @bitCast(data[offset.*..][0..4].*));
-    offset.* += 4;
-    return v;
-}
-
-fn readU64(data: []const u8, offset: *usize) u64 {
-    const v = std.mem.littleToNative(u64, @bitCast(data[offset.*..][0..8].*));
-    offset.* += 8;
-    return v;
-}
-
-fn readU32NoAdvance(data: []const u8, offset: usize) u32 {
-    return std.mem.littleToNative(u32, @bitCast(data[offset..][0..4].*));
-}
 
 // ============================================================================
 // Unit Tests
@@ -228,14 +202,14 @@ test "manifest deserialize rejects oversized count" {
     var buf: [48]u8 = undefined;
     @memcpy(buf[0..8], &MANIFEST_MAGIC);
     var pos: usize = 8;
-    writeU32(&buf, &pos, MANIFEST_VERSION);
-    writeU64(&buf, &pos, 0); // counter
-    writeU64(&buf, &pos, 0); // lsn
-    writeU64(&buf, &pos, 0); // total_docs
-    writeU32(&buf, &pos, 0); // avg_doc_len
-    writeU32(&buf, &pos, 0xFFFFFFFF); // segment_count -- adversarial
+    utils.writeU32Le(&buf, &pos, MANIFEST_VERSION);
+    utils.writeU64Le(&buf, &pos, 0); // counter
+    utils.writeU64Le(&buf, &pos, 0); // lsn
+    utils.writeU64Le(&buf, &pos, 0); // total_docs
+    utils.writeU32Le(&buf, &pos, 0); // avg_doc_len
+    utils.writeU32Le(&buf, &pos, 0xFFFFFFFF); // segment_count -- adversarial
     const crc = utils.hashCrc32c(buf[0..44]);
-    writeU32(&buf, &pos, crc);
+    utils.writeU32Le(&buf, &pos, crc);
 
     try std.testing.expectError(error.SegmentCountTooLarge, Manifest.deserialize(allocator, &buf));
 }

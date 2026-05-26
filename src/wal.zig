@@ -32,13 +32,13 @@ pub const WalRecord = struct {
         const buf = try alloc.alloc(u8, size);
         buf[0] = @intFromEnum(self.record_type);
         var pos: usize = 1;
-        writeU64(buf, &pos, self.txn_id);
-        writeU64(buf, &pos, self.doc_id);
-        writeU32(buf, &pos, payload_len);
+        utils.writeU64Le(buf, &pos, self.txn_id);
+        utils.writeU64Le(buf, &pos, self.doc_id);
+        utils.writeU32Le(buf, &pos, payload_len);
         @memcpy(buf[pos .. pos + payload_len], self.payload);
         pos += payload_len;
         const crc = utils.hashCrc32c(buf[0..pos]);
-        writeU32(buf, &pos, crc);
+        utils.writeU32Le(buf, &pos, crc);
         return buf;
     }
 
@@ -51,16 +51,16 @@ pub const WalRecord = struct {
         const record_type = @as(WalRecordType, @enumFromInt(record_type_val));
         pos += 1;
 
-        const txn_id = readU64(data, &pos);
-        const doc_id = readU64(data, &pos);
-        const payload_len = readU32(data, &pos);
+        const txn_id = utils.readU64Le(data, &pos);
+        const doc_id = utils.readU64Le(data, &pos);
+        const payload_len = utils.readU32Le(data, &pos);
 
         if (data.len < pos + payload_len + 4) return error.Incomplete;
 
         const payload = data[pos .. pos + payload_len];
         pos += payload_len;
 
-        const stored_crc = readU32(data, &pos);
+        const stored_crc = utils.readU32Le(data, &pos);
         const computed_crc = utils.hashCrc32c(data[0 .. pos - 4]);
         if (stored_crc != computed_crc) return error.ChecksumMismatch;
 
@@ -107,28 +107,6 @@ pub const WalWriter = struct {
     }
 };
 
-fn writeU32(buf: []u8, pos: *usize, value: u32) void {
-    @memcpy(buf[pos.*..][0..4], &std.mem.toBytes(std.mem.nativeToLittle(u32, value)));
-    pos.* += 4;
-}
-
-fn writeU64(buf: []u8, pos: *usize, value: u64) void {
-    @memcpy(buf[pos.*..][0..8], &std.mem.toBytes(std.mem.nativeToLittle(u64, value)));
-    pos.* += 8;
-}
-
-fn readU32(data: []const u8, offset: *usize) u32 {
-    const v = std.mem.littleToNative(u32, @bitCast(data[offset.*..][0..4].*));
-    offset.* += 4;
-    return v;
-}
-
-fn readU64(data: []const u8, offset: *usize) u64 {
-    const v = std.mem.littleToNative(u64, @bitCast(data[offset.*..][0..8].*));
-    offset.* += 8;
-    return v;
-}
-
 pub const WalReader = struct {
     file: std.Io.File,
     allocator: Allocator,
@@ -161,9 +139,9 @@ pub const WalReader = struct {
         const record_type = @as(WalRecordType, @enumFromInt(record_type_val));
         pos += 1;
 
-        const txn_id = readU64(&header_buf, &pos);
-        const doc_id = readU64(&header_buf, &pos);
-        const payload_len = readU32(&header_buf, &pos);
+        const txn_id = utils.readU64Le(&header_buf, &pos);
+        const doc_id = utils.readU64Le(&header_buf, &pos);
+        const payload_len = utils.readU32Le(&header_buf, &pos);
 
         if (payload_len > 10 * 1024 * 1024) return error.InvalidData;
 
@@ -176,7 +154,7 @@ pub const WalReader = struct {
 
         const payload = payload_and_crc[0..payload_len];
         var crc_pos: usize = payload_len;
-        const stored_crc = readU32(payload_and_crc, &crc_pos);
+        const stored_crc = utils.readU32Le(payload_and_crc, &crc_pos);
 
         var hasher = std.hash.crc.Crc32Iscsi.init();
         hasher.update(&header_buf);

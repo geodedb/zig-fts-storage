@@ -342,7 +342,7 @@ pub const SegmentReader = struct {
         return null;
     }
 
-    fn readU32(file: std.Io.File, io: std.Io) !u32 {
+    fn readU32FromFile(file: std.Io.File, io: std.Io) !u32 {
         var buf: [4]u8 = undefined;
         var iov = [_][]u8{&buf};
         const read = try file.readStreaming(io, &iov);
@@ -350,7 +350,7 @@ pub const SegmentReader = struct {
         return std.mem.readInt(u32, &buf, .little);
     }
 
-    fn readU16(file: std.Io.File, io: std.Io) !u16 {
+    fn readU16FromFile(file: std.Io.File, io: std.Io) !u16 {
         var buf: [2]u8 = undefined;
         var iov = [_][]u8{&buf};
         const read = try file.readStreaming(io, &iov);
@@ -358,7 +358,7 @@ pub const SegmentReader = struct {
         return std.mem.readInt(u16, &buf, .little);
     }
 
-    fn readU64(file: std.Io.File, io: std.Io) !u64 {
+    fn readU64FromFile(file: std.Io.File, io: std.Io) !u64 {
         var buf: [8]u8 = undefined;
         var iov = [_][]u8{&buf};
         const read = try file.readStreaming(io, &iov);
@@ -376,13 +376,13 @@ pub const SegmentReader = struct {
         if (seg_dir.openFile(self.io, "terms.hash", .{})) |file| {
             defer file.close(self.io);
 
-            const count = readU32(file, self.io) catch 0;
+            const count = readU32FromFile(file, self.io) catch 0;
             if (count > limits.MAX_TERMS_PER_SEGMENT) return error.TermCountTooLarge;
             try self.dictionary.ensureTotalCapacity(self.allocator, count);
 
             var i: usize = 0;
             while (i < count) : (i += 1) {
-                const term_len = try readU16(file, self.io);
+                const term_len = try readU16FromFile(file, self.io);
                 const term = try self.allocator.alloc(u8, term_len);
                 errdefer self.allocator.free(term);
 
@@ -390,9 +390,9 @@ pub const SegmentReader = struct {
                 const read = try file.readStreaming(self.io, &iov);
                 if (read < term_len) return error.Incomplete;
 
-                const df = try readU64(file, self.io);
-                const offset = try readU64(file, self.io);
-                const len = try readU64(file, self.io);
+                const df = try readU64FromFile(file, self.io);
+                const offset = try readU64FromFile(file, self.io);
+                const len = try readU64FromFile(file, self.io);
 
                 self.dictionary.putAssumeCapacityNoClobber(term, .{
                     .df = df,
@@ -407,13 +407,13 @@ pub const SegmentReader = struct {
         // Load tombstones
         if (seg_dir.openFile(self.io, "tombstones.bin", .{})) |file| {
             defer file.close(self.io);
-            const count = readU32(file, self.io) catch 0;
+            const count = readU32FromFile(file, self.io) catch 0;
             if (count > limits.MAX_TOMBSTONES_PER_SEGMENT) return error.TombstoneCountTooLarge;
             try self.tombstones.ensureTotalCapacity(self.allocator, count);
 
             var i: usize = 0;
             while (i < count) : (i += 1) {
-                const doc_id = try readU64(file, self.io);
+                const doc_id = try readU64FromFile(file, self.io);
                 self.tombstones.putAssumeCapacityNoClobber(doc_id, {});
             }
         } else |err| {

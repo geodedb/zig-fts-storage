@@ -24,6 +24,50 @@ pub fn dirMode(mode: u32) std.Io.Dir.Permissions {
     return .default_dir;
 }
 
+// ============================================================================
+// Buffer-based little-endian integer helpers (WRK-019, QUAL-0012, D-1, D-2,
+// QUAL-0023). Each `writeU*Le` advances `pos` past the bytes it wrote;
+// each `readU*Le` advances `offset` past the bytes it read. `readU32LeAt`
+// is the random-access variant that does not advance.
+// ============================================================================
+
+pub fn writeU16Le(buf: []u8, pos: *usize, value: u16) void {
+    std.mem.writeInt(u16, buf[pos.*..][0..2], value, .little);
+    pos.* += 2;
+}
+
+pub fn writeU32Le(buf: []u8, pos: *usize, value: u32) void {
+    std.mem.writeInt(u32, buf[pos.*..][0..4], value, .little);
+    pos.* += 4;
+}
+
+pub fn writeU64Le(buf: []u8, pos: *usize, value: u64) void {
+    std.mem.writeInt(u64, buf[pos.*..][0..8], value, .little);
+    pos.* += 8;
+}
+
+pub fn readU16Le(data: []const u8, offset: *usize) u16 {
+    const v = std.mem.readInt(u16, data[offset.*..][0..2], .little);
+    offset.* += 2;
+    return v;
+}
+
+pub fn readU32Le(data: []const u8, offset: *usize) u32 {
+    const v = std.mem.readInt(u32, data[offset.*..][0..4], .little);
+    offset.* += 4;
+    return v;
+}
+
+pub fn readU64Le(data: []const u8, offset: *usize) u64 {
+    const v = std.mem.readInt(u64, data[offset.*..][0..8], .little);
+    offset.* += 8;
+    return v;
+}
+
+pub fn readU32LeAt(data: []const u8, offset: usize) u32 {
+    return std.mem.readInt(u32, data[offset..][0..4], .little);
+}
+
 /// LEB128 decoding from a byte slice. Returns the value and bytes read.
 pub fn readVarInt(buf: []const u8) !struct { val: u64, bytes_read: usize } {
     var result: u64 = 0;
