@@ -232,9 +232,8 @@ pub const Engine = struct {
         }
 
         const txn_id = self.next_txn_id;
-        self.next_txn_id += 1;
 
-        // Serialize payload
+        // Serialize payload first; no memtable mutation yet.
         var payload_list: std.ArrayListUnmanaged(u8) = .empty;
         defer payload_list.deinit(self.allocator);
 
@@ -254,8 +253,6 @@ pub const Engine = struct {
                 const written = try utils.writeVarInt(&vbuf, p);
                 try payload_list.appendSlice(self.allocator, vbuf[0..written]);
             }
-
-            try self.memtable.addPosting(t.term, doc_id, t.positions);
         }
 
         const rec = wal.WalRecord{
@@ -265,8 +262,18 @@ pub const Engine = struct {
             .payload = payload_list.items,
         };
 
+        // WAL first — durable before in-memory mutation. If WAL append/sync
+        // fails the memtable stays untouched and the next flush cannot diverge
+        // from the durable log (QUAL-0007).
         try self.wal_writer.?.append(rec);
         try self.wal_writer.?.sync();
+
+        // Only mutate memtable after WAL is durable. Bump next_txn_id last so
+        // a partial failure does not consume a txn id.
+        for (terms) |t| {
+            try self.memtable.addPosting(t.term, doc_id, t.positions);
+        }
+        self.next_txn_id += 1;
     }
 
     pub fn deleteDocument(self: *Engine, doc_id: u64) !void {

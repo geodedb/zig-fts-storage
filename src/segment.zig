@@ -60,20 +60,28 @@ pub const Memtable = struct {
     pub fn addPosting(self: *Memtable, term: []const u8, doc_id: u64, positions: []const u32) !void {
         var entry = try self.dictionary.getOrPut(self.allocator, term);
         if (!entry.found_existing) {
-            // Dup the string to own it
-            entry.key_ptr.* = try self.allocator.dupe(u8, term);
+            // Dup the string to own it. Guard against partial init: if any
+            // subsequent step fails the dup'd key would otherwise leak and the
+            // hash map would retain a slot pointing at uninitialized memory.
+            const key_copy = try self.allocator.dupe(u8, term);
+            errdefer self.allocator.free(key_copy);
+            entry.key_ptr.* = key_copy;
             entry.value_ptr.* = .{
                 .postings = .empty,
                 .df = 0,
             };
+            errdefer _ = self.dictionary.remove(key_copy);
         }
 
-        var pos_list = std.ArrayListUnmanaged(u32).empty;
-        try pos_list.appendSlice(self.allocator, positions);
+        var pos_list: std.ArrayListUnmanaged(u32) = .empty;
+        errdefer pos_list.deinit(self.allocator);
+        try pos_list.ensureTotalCapacity(self.allocator, positions.len);
+        pos_list.appendSliceAssumeCapacity(positions);
 
+        const tf_u32 = std.math.cast(u32, positions.len) orelse return error.PositionCountTooLarge;
         try entry.value_ptr.postings.append(self.allocator, .{
             .doc_id = doc_id,
-            .tf = @intCast(positions.len),
+            .tf = tf_u32,
             .positions = pos_list,
         });
         entry.value_ptr.df += 1;
