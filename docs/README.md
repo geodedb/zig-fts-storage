@@ -2,19 +2,25 @@
 
 ## Overview
 
-A Zig library for fts-storage
+An append-only, crash-recoverable inverted-index storage engine for
+full-text search, written in pure Zig.
 
 ## Table of Contents
 
-- [Getting Started](getting-started.md)
-- [API Reference](api-reference.md)
-- [Examples](examples.md)
-- [Architecture](architecture.md)
-- [FAQ](faq.md)
+- [Project README](../README.md) — install, build, quick start
+- [Requirements](REQUIREMENTS.md) — functional and non-functional requirements
+- [Gap Analysis](GAP_ANALYSIS.md) — open gaps tracking
+- [Security Gaps](SECURITY_GAP_ANALYSIS.md)
+- [Quality Gaps](QUALITY_GAP_ANALYSIS.md)
+- [Performance Gaps](PERF_GAP_ANALYSIS.md)
+- [Resolved Gaps](GAP_ANALYSIS_RESOLVED.md)
 
 ## Quick Links
 
 - [Installation](../README.md#installation)
+- [Quick Start](../README.md#quick-start)
+- [Examples](../examples/basic.zig)
+- [Benchmarks](../benchmarks/README.md)
 - [Contributing](../CONTRIBUTING.md)
-- [Security](../SECURITY.md)
+- [Security Policy](../SECURITY.md)
 - [Changelog](../CHANGELOG.md)

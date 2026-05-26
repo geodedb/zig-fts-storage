@@ -3,14 +3,18 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Zig](https://img.shields.io/badge/Zig-0.16.0+-orange.svg)](https://ziglang.org/)
 
-A Zig library for fts-storage
+An append-only, crash-recoverable inverted-index storage engine for full-text search, written in pure Zig.
 
 ## Features
 
-- **Zero dependencies**: pure Zig standard library only
-- **Library + CLI**: ships as both a Zig module and a standalone binary
-- **Cross-platform**: Linux, macOS, Windows
-- **Well tested**: unit, integration, and stress test suites
+- Append-only WAL with CRC32C-checked records (durable, crash-recoverable)
+- A/B atomic manifest with monotonic counter
+- LSM-style immutable segments with delta+varint postings
+- Tombstone-based deletes; tombstones consulted at search time
+- WAL replay on startup; replay tolerant of clean truncation
+- Pure Zig 0.16+ standard library; **zero external dependencies**
+- Cross-platform (Linux, macOS, Windows)
+- Well tested: unit, integration, and stress test suites
 
 ## Installation
 
@@ -41,14 +45,27 @@ exe.root_module.addImport("fts_storage", fts_storage.module("fts_storage"));
 
 ```zig
 const std = @import("std");
-const fts_storage = @import("fts_storage");
+const Io = std.Io;
+const fts = @import("fts_storage");
 
-pub fn main() !void {
-    try fts_storage.init(.{ .debug = true });
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const allocator = init.arena.allocator();
+
+    var dir = try Io.Dir.cwd().createDirPathOpen(io, "data", .{});
+    defer dir.close(io);
+
+    var engine = try fts.Engine.init(io, allocator, dir);
+    defer engine.deinit();
+
+    const term = fts.TermPosting{ .term = "hello", .positions = &[_]u32{ 1, 5 } };
+    try engine.indexDocument(42, &[_]fts.TermPosting{term});
+    try engine.flush();
 }
 ```
 
-Build and run the CLI directly from the repo:
+See [`examples/basic.zig`](examples/basic.zig) for the canonical working
+example. Build and run the CLI directly from the repo:
 
 ```bash
 zig build run -- <args...>
