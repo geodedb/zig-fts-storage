@@ -10,8 +10,10 @@
 
 const std = @import("std");
 const Io = std.Io;
-const lib = @import("fts_storage");
+const fts = @import("fts_storage");
 const framework = @import("framework");
+
+const IoBox = struct { io: std.Io };
 
 pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(init.gpa);
@@ -22,12 +24,15 @@ pub fn main(init: std.process.Init) !void {
     var stderr_writer = Io.File.stderr().writer(init.io, &stderr_buf);
     const stderr = &stderr_writer.interface;
 
+    var io_box = IoBox{ .io = init.io };
+
     const scenarios = [_]framework.Scenario{
         .{
-            .name = "init_default_x100k",
-            .ops_per_iteration = 100_000,
+            .name = "engine_init_x32",
+            .ops_per_iteration = 32,
             .warmup_iterations = 2,
             .sample_iterations = 6,
+            .user_data = @ptrCast(&io_box),
             .run = run,
         },
     };
@@ -39,9 +44,18 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
+fn ioFromCtx(ctx: *framework.Context) std.Io {
+    const box: *IoBox = @ptrCast(@alignCast(ctx.user_data.?));
+    return box.io;
+}
+
 fn run(ctx: *framework.Context) anyerror!void {
+    const io = ioFromCtx(ctx);
     var i: u64 = 0;
     while (i < ctx.scenario.ops_per_iteration) : (i += 1) {
-        try lib.init(.{});
+        var tmp_dir = try Io.Dir.cwd().createDirPathOpen(io, ".micro-tmp", .{});
+        defer tmp_dir.close(io);
+        var engine = try fts.Engine.init(io, ctx.allocator, tmp_dir);
+        engine.deinit();
     }
 }

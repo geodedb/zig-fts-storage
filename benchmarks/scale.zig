@@ -10,8 +10,10 @@
 
 const std = @import("std");
 const Io = std.Io;
-const lib = @import("fts_storage");
+const fts = @import("fts_storage");
 const framework = @import("framework");
+
+const IoBox = struct { io: std.Io };
 
 pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(init.gpa);
@@ -22,20 +24,16 @@ pub fn main(init: std.process.Init) !void {
     var stderr_writer = Io.File.stderr().writer(init.io, &stderr_buf);
     const stderr = &stderr_writer.interface;
 
+    var io_box = IoBox{ .io = init.io };
+
     const scenarios = [_]framework.Scenario{
         .{
-            .name = "init_default_x1m",
-            .ops_per_iteration = 1_000_000,
+            .name = "engine_index_x100k",
+            .ops_per_iteration = 100_000,
             .warmup_iterations = 1,
             .sample_iterations = 5,
-            .run = runDefault,
-        },
-        .{
-            .name = "init_custom_x1m",
-            .ops_per_iteration = 1_000_000,
-            .warmup_iterations = 1,
-            .sample_iterations = 5,
-            .run = runCustom,
+            .user_data = @ptrCast(&io_box),
+            .run = runIndexLarge,
         },
     };
 
@@ -46,20 +44,21 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn runDefault(ctx: *framework.Context) anyerror!void {
-    var i: u64 = 0;
-    while (i < ctx.scenario.ops_per_iteration) : (i += 1) {
-        try lib.init(.{});
-    }
+fn ioFromCtx(ctx: *framework.Context) std.Io {
+    const box: *IoBox = @ptrCast(@alignCast(ctx.user_data.?));
+    return box.io;
 }
 
-fn runCustom(ctx: *framework.Context) anyerror!void {
+fn runIndexLarge(ctx: *framework.Context) anyerror!void {
+    const io = ioFromCtx(ctx);
+    var tmp_dir = try Io.Dir.cwd().createDirPathOpen(io, ".scale-tmp", .{});
+    defer tmp_dir.close(io);
+    var engine = try fts.Engine.init(io, ctx.allocator, tmp_dir);
+    defer engine.deinit();
+
     var i: u64 = 0;
     while (i < ctx.scenario.ops_per_iteration) : (i += 1) {
-        try lib.init(.{
-            .debug = (i & 1) == 0,
-            .max_retries = @intCast(1 + (i % 16)),
-            .timeout_ms = 1 + (i % 1024),
-        });
+        const term = fts.TermPosting{ .term = "scale", .positions = &[_]u32{ 1, 2 } };
+        try engine.indexDocument(i, &[_]fts.TermPosting{term});
     }
 }
