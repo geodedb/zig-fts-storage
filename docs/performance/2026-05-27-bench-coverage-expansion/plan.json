@@ -1,0 +1,425 @@
+{
+  "slug": "bench-coverage-expansion",
+  "baseline_sha": "790aa13",
+  "target_sha": "HEAD",
+  "created_at": "2026-05-27",
+  "run_dir": "docs/performance/2026-05-27-bench-coverage-expansion",
+  "language": "zig",
+  "zig_version": "0.16.0",
+  "scope": "design_implement_only",
+  "ab": false,
+
+  "scenarios": [
+    {
+      "id": "varint_encode_1byte",
+      "layer": "micro",
+      "file": "benchmarks/micro/varint.zig",
+      "build_step": "bench-micro-varint",
+      "hot_path_refs": ["src/utils.zig:109-127"],
+      "intent": "Encode a value fitting in one LEB128 byte (e.g. 42). Best-case encode throughput. Confirms zero heap allocation per call.",
+      "ops_per_iteration": 100000,
+      "warmups": 3,
+      "rounds": 30,
+      "metrics": ["wall_ns_p50", "throughput_ops_per_sec", "alloc_count", "alloc_bytes"],
+      "zero_alloc_expected": true,
+      "alloc_probe_required": true,
+      "alloc_probe_plan": "Run with TrackingAllocator (track_allocations=true). Assert alloc_count==0 across all sampled iterations. Body uses only stack-allocated buf[10] for output.",
+      "do_not_optimize_away_required": true,
+      "do_not_optimize_away_targets": ["return value of writeVarInt (usize bytes_written)"],
+      "workload_description": "Loop ops_per_iteration times calling writeVarInt(&buf, 42). buf is a [10]u8 on the stack. Pass returned byte count to std.mem.doNotOptimizeAway.",
+      "deterministic_seed": null,
+      "concurrency_shapes": ["N=1"],
+      "preservation_impact": ["zig build test (utils.zig unit tests must pass)"]
+    },
+    {
+      "id": "varint_encode_10byte",
+      "layer": "micro",
+      "file": "benchmarks/micro/varint.zig",
+      "build_step": "bench-micro-varint",
+      "hot_path_refs": ["src/utils.zig:109-127"],
+      "intent": "Encode u64 MAX (10-byte LEB128). Exercises the full shift loop and confirms overflow is not triggered.",
+      "ops_per_iteration": 100000,
+      "warmups": 3,
+      "rounds": 30,
+      "metrics": ["wall_ns_p50", "throughput_ops_per_sec", "alloc_count", "alloc_bytes"],
+      "zero_alloc_expected": true,
+      "alloc_probe_required": true,
+      "alloc_probe_plan": "Same as varint_encode_1byte. Stack buffer only.",
+      "do_not_optimize_away_required": true,
+      "do_not_optimize_away_targets": ["return value of writeVarInt (usize bytes_written)"],
+      "workload_description": "Loop ops_per_iteration times calling writeVarInt(&buf, std.math.maxInt(u64)). Pass returned byte count to std.mem.doNotOptimizeAway.",
+      "deterministic_seed": null,
+      "concurrency_shapes": ["N=1"],
+      "preservation_impact": ["zig build test (utils.zig unit tests must pass)"]
+    },
+    {
+      "id": "varint_decode_1byte",
+      "layer": "micro",
+      "file": "benchmarks/micro/varint.zig",
+      "build_step": "bench-micro-varint",
+      "hot_path_refs": ["src/utils.zig:83-102"],
+      "intent": "Decode a one-byte LEB128 value from a stack-allocated buffer. Zero heap. Establishes best-case decode ns/op.",
+      "ops_per_iteration": 100000,
+      "warmups": 3,
+      "rounds": 30,
+      "metrics": ["wall_ns_p50", "throughput_ops_per_sec", "alloc_count", "alloc_bytes"],
+      "zero_alloc_expected": true,
+      "alloc_probe_required": true,
+      "alloc_probe_plan": "Input buffer is a const [1]u8 on the stack. readVarInt returns a struct on the stack. No heap path in the decode loop for valid inputs.",
+      "do_not_optimize_away_required": true,
+      "do_not_optimize_away_targets": ["result.val (u64)", "result.bytes_read (usize)"],
+      "workload_description": "Pre-encode value 42 into a stack buffer before the timed loop. Loop ops_per_iteration times calling readVarInt(buf[0..]). Pass val and bytes_read to doNotOptimizeAway.",
+      "deterministic_seed": null,
+      "concurrency_shapes": ["N=1"],
+      "preservation_impact": ["zig build test (utils.zig unit tests must pass)"]
+    },
+    {
+      "id": "varint_decode_10byte",
+      "layer": "micro",
+      "file": "benchmarks/micro/varint.zig",
+      "build_step": "bench-micro-varint",
+      "hot_path_refs": ["src/utils.zig:83-102"],
+      "intent": "Decode a 10-byte LEB128 value. Exercises the overflow guard at shift==63 (SEC-EXT-0210).",
+      "ops_per_iteration": 100000,
+      "warmups": 3,
+      "rounds": 30,
+      "metrics": ["wall_ns_p50", "throughput_ops_per_sec", "alloc_count", "alloc_bytes"],
+      "zero_alloc_expected": true,
+      "alloc_probe_required": true,
+      "alloc_probe_plan": "Same as varint_decode_1byte. Stack buffer only.",
+      "do_not_optimize_away_required": true,
+      "do_not_optimize_away_targets": ["result.val (u64)", "result.bytes_read (usize)"],
+      "workload_description": "Pre-encode std.math.maxInt(u64) into a [10]u8 stack buffer before the timed loop. Loop calling readVarInt. Pass val and bytes_read to doNotOptimizeAway.",
+      "deterministic_seed": null,
+      "concurrency_shapes": ["N=1"],
+      "preservation_impact": ["zig build test (utils.zig unit tests must pass)"]
+    },
+    {
+      "id": "bm25_score_single",
+      "layer": "micro",
+      "file": "benchmarks/micro/bm25.zig",
+      "build_step": "bench-micro-bm25",
+      "hot_path_refs": ["src/search.zig:187-222"],
+      "intent": "Measure BM25 score arithmetic in isolation. tf=3, df=100, N=10000, dl=50, avg_dl=50. Confirms zero heap allocation per call.",
+      "ops_per_iteration": 1000000,
+      "warmups": 3,
+      "rounds": 30,
+      "metrics": ["wall_ns_p50", "throughput_ops_per_sec", "alloc_count", "alloc_bytes"],
+      "zero_alloc_expected": true,
+      "alloc_probe_required": true,
+      "alloc_probe_plan": "BM25 arithmetic uses only register-resident floats. No heap path. TrackingAllocator alloc_count must remain 0.",
+      "do_not_optimize_away_required": true,
+      "do_not_optimize_away_targets": ["score (f32)"],
+      "workload_description": "Inline the BM25 formula (idf * tf_norm) using fixed constants. Loop ops_per_iteration times. Pass f32 result to doNotOptimizeAway. Do not call into Engine or TermIterator; compute the formula directly to keep the scenario dependency-free.",
+      "deterministic_seed": null,
+      "concurrency_shapes": ["N=1"],
+      "preservation_impact": ["zig build test (search.zig unit tests must pass)"]
+    },
+    {
+      "id": "bm25_score_norm_scan_16seg",
+      "layer": "micro",
+      "file": "benchmarks/micro/bm25.zig",
+      "build_step": "bench-micro-bm25",
+      "hot_path_refs": ["src/search.zig:205-214"],
+      "intent": "Measure O(segments) norm lookup cost for a 16-segment engine. Exposes the linear scan over segment norm maps.",
+      "ops_per_iteration": 100000,
+      "warmups": 3,
+      "rounds": 30,
+      "metrics": ["wall_ns_p50", "throughput_ops_per_sec", "alloc_count", "alloc_bytes"],
+      "zero_alloc_expected": true,
+      "alloc_probe_required": true,
+      "alloc_probe_plan": "16 norm maps are allocated once before the timed loop (in setup, not in the body). The timed body only calls get() on each. alloc_count across sampled iterations must be 0.",
+      "do_not_optimize_away_required": true,
+      "do_not_optimize_away_targets": ["dl_u32 (u32) looked up from norm table", "score (f32)"],
+      "workload_description": "Create an array of 16 AutoHashMapUnmanaged(u64, u32) pre-populated with 1000 doc_id->length entries each (seeded, deterministic). Timed body: for each iteration, scan all 16 maps looking for a fixed doc_id (present in the last map to exercise worst-case). Compute BM25 score with the found dl. Pass dl_u32 and score to doNotOptimizeAway.",
+      "deterministic_seed": "0xdeadbeef_cafef00d",
+      "concurrency_shapes": ["N=1"],
+      "preservation_impact": ["zig build test (search.zig unit tests must pass)"]
+    },
+    {
+      "id": "wal_record_serialize_into",
+      "layer": "micro",
+      "file": "benchmarks/micro/wal_record.zig",
+      "build_step": "bench-micro-wal-record",
+      "hot_path_refs": ["src/wal.zig:59-77"],
+      "intent": "Serialize one WalRecord into a reused ArrayListUnmanaged scratch buffer via serializeInto. Converges to zero allocs after first call as scratch buffer pre-grows.",
+      "ops_per_iteration": 100000,
+      "warmups": 3,
+      "rounds": 30,
+      "metrics": ["wall_ns_p50", "throughput_ops_per_sec", "alloc_count", "alloc_bytes"],
+      "zero_alloc_expected": false,
+      "alloc_probe_required": true,
+      "alloc_probe_plan": "alloc_count is expected to be 0 across all SAMPLED iterations (warmup allows initial scratch growth). If alloc_count > 0 in sampled iterations, the scratch buffer is being reset incorrectly. Check that clearRetainingCapacity() is called, not deinit()+init().",
+      "do_not_optimize_away_required": true,
+      "do_not_optimize_away_targets": ["scratch.items[0] (u8) after serialization"],
+      "workload_description": "Construct one WalRecord with record_type=.index_doc, txn_id=1, doc_id=42, payload=16-byte fixed slice. Allocate one ArrayListUnmanaged(u8) as scratch before the timed loop. Each iteration: clearRetainingCapacity(), call record.serializeInto(allocator, &scratch), pass scratch.items[0] to doNotOptimizeAway.",
+      "deterministic_seed": null,
+      "concurrency_shapes": ["N=1"],
+      "preservation_impact": ["zig build test (wal.zig unit tests must pass)"]
+    },
+    {
+      "id": "ingest_100k_docs_random_terms",
+      "layer": "integration",
+      "file": "benchmarks/bench.zig",
+      "build_step": "bench",
+      "hot_path_refs": [
+        "src/engine.zig:665-674",
+        "src/wal.zig:157-190",
+        "src/segment.zig:88-126"
+      ],
+      "intent": "Index 100,000 documents each with 8 random terms from a 50,000-word vocabulary. Measures full engine throughput including WAL append+fsync, Memtable.addPosting, and auto-flush. Named scenario from PERF_GAP_ANALYSIS roadmap.",
+      "ops_per_iteration": 100000,
+      "warmups": 1,
+      "rounds": 5,
+      "metrics": ["wall_ns_p50", "throughput_ops_per_sec", "alloc_count", "alloc_bytes", "peak_live_bytes", "rss_current_bytes"],
+      "zero_alloc_expected": false,
+      "alloc_probe_required": true,
+      "alloc_probe_plan": "alloc_count per iteration is expected to be high (addPosting allocates per new term key). Record the baseline alloc_count as the tracking metric for the future SoA refactor (PERF-0016). No assertion; value is informational.",
+      "do_not_optimize_away_required": false,
+      "do_not_optimize_away_targets": [],
+      "workload_description": "Before timed body: init DefaultPrng with seed 0xdeadbeef_cafef00d. Build a vocabulary of 50,000 terms as fixed strings (word_00000..word_49999). Each iteration: create fresh Engine in isolated tmpdir, index ops_per_iteration documents each with 8 randomly-selected terms (1 position per term: [doc_id % 100]). Engine.deinit at end of iteration. The workload generator (vocabulary + prng) is set up in user_data before the scenario runs so the timed body only calls indexDocument.",
+      "deterministic_seed": "0xdeadbeef_cafef00d",
+      "concurrency_shapes": ["N=1"],
+      "preservation_impact": [
+        "zig build test",
+        "zig build test-integration",
+        "benchmark-regression CI job (existing scenarios must not regress)"
+      ]
+    },
+    {
+      "id": "flush_100k_term_memtable",
+      "layer": "integration",
+      "file": "benchmarks/bench.zig",
+      "build_step": "bench",
+      "hot_path_refs": [
+        "src/segment.zig:223-294",
+        "src/segment.zig:183-221"
+      ],
+      "intent": "Build a Memtable with 100,000 distinct terms (1 posting each, 1 position) then flush. Isolates writeDictionaryAndPostings + writeNorms. Named scenario from PERF_GAP_ANALYSIS roadmap.",
+      "ops_per_iteration": 1,
+      "warmups": 1,
+      "rounds": 5,
+      "metrics": ["wall_ns_p50", "throughput_ops_per_sec", "alloc_count", "alloc_bytes", "peak_live_bytes"],
+      "zero_alloc_expected": false,
+      "alloc_probe_required": true,
+      "alloc_probe_plan": "alloc_count captures all allocations during the flush (dict_buf, post_buf, norms_buf growths). Record as baseline for PERF-0004 improvements. No assertion; value is informational.",
+      "do_not_optimize_away_required": false,
+      "do_not_optimize_away_targets": [],
+      "workload_description": "Before timed body (in warmup): build Engine, insert 100,000 documents each with a unique term (term_00000..term_99999), 1 position per term, but do NOT trigger auto-flush (keep docs below DEFAULT_MEMTABLE_FLUSH_THRESHOLD_DOCS by using a single doc per term with doc_id = term_index). Timed body: call engine.flush(). Create a new Engine with fresh tmpdir per sample iteration so each flush measures a cold segment write. The 100k-term memtable construction must happen outside the timed region — place it in a setup step driven by iteration_index==0 detection or via user_data holding a pre-built Engine reference.",
+      "deterministic_seed": "0xdeadbeef_cafef00d",
+      "concurrency_shapes": ["N=1"],
+      "preservation_impact": [
+        "zig build test",
+        "zig build test-integration",
+        "benchmark-regression CI job (existing scenarios must not regress)"
+      ]
+    },
+    {
+      "id": "replay_wal_1M_records",
+      "layer": "integration",
+      "file": "benchmarks/bench.zig",
+      "build_step": "bench",
+      "hot_path_refs": [
+        "src/engine.zig:420-519"
+      ],
+      "intent": "Replay a pre-generated WAL with 1,000,000 index_doc records (bracketed begin/commit, 16-byte payload each). Measures three-pass replay cost. Named scenario from PERF_GAP_ANALYSIS roadmap.",
+      "ops_per_iteration": 1,
+      "warmups": 1,
+      "rounds": 5,
+      "metrics": ["wall_ns_p50", "throughput_ops_per_sec", "alloc_count", "alloc_bytes", "peak_live_bytes", "rss_current_bytes"],
+      "zero_alloc_expected": false,
+      "alloc_probe_required": true,
+      "alloc_probe_plan": "alloc_count expected ~3M (one dupe per record payload plus hash map entries). Record as baseline for future streaming two-pass replay optimization (WRK-025 follow-up). No assertion.",
+      "do_not_optimize_away_required": false,
+      "do_not_optimize_away_targets": [],
+      "workload_description": "Before timed body (once, in warmup iteration): write a WAL file with 1,000,000 records. Each record: record_type=index_doc, txn_id=i, doc_id=i, payload=16 deterministic bytes (e.g. little-endian i repeated). Bracket each with begin (txn_id=i) and commit (txn_id=i) records so the three-pass replayer applies all records. Use WalWriter.append (not appendAndSync) for speed during WAL construction. Sync once at the end. Store the pre-built directory path in user_data. Timed body: call Engine.init on that directory (which triggers replayWal), then engine.deinit(). Copy the pre-built directory to a fresh tmpdir per sample so each replay starts from the same WAL bytes.",
+      "deterministic_seed": "0xdeadbeef_cafef00d",
+      "concurrency_shapes": ["N=1"],
+      "preservation_impact": [
+        "zig build test",
+        "zig build test-integration",
+        "benchmark-regression CI job (existing scenarios must not regress)"
+      ]
+    },
+    {
+      "id": "query_term_iterator_16_segments",
+      "layer": "integration",
+      "file": "benchmarks/bench.zig",
+      "build_step": "bench",
+      "hot_path_refs": [
+        "src/segment.zig:518-564",
+        "src/segment.zig:451-515",
+        "src/search.zig:187-222"
+      ],
+      "intent": "Query a term across 16 flushed segments. Advance TermIterator to exhaustion with positions. Measures end-to-end query path including BM25 scoring and norm lookup. Named scenario from PERF_GAP_ANALYSIS roadmap.",
+      "ops_per_iteration": 1,
+      "warmups": 1,
+      "rounds": 5,
+      "metrics": ["wall_ns_p50", "throughput_ops_per_sec", "alloc_count", "alloc_bytes"],
+      "zero_alloc_expected": false,
+      "alloc_probe_required": true,
+      "alloc_probe_plan": "alloc_count expected to be non-zero (SegmentReader.search allocates the postings data buffer per segment per call). Record as baseline. No assertion.",
+      "do_not_optimize_away_required": true,
+      "do_not_optimize_away_targets": ["match.doc_id (u64) on each iteration of TermIterator.next"],
+      "workload_description": "Before timed body (once, in warmup): init Engine, index 160,000 documents across 16 explicit flush boundaries (10,000 docs per flush, each doc has term 'bench_query' plus 7 random terms from a 1000-word vocab). Store engine reference in user_data. Timed body: call engine.search('bench_query'), advance iterator until null, counting matches. Pass last match doc_id to doNotOptimizeAway. Assert match count equals 160,000.",
+      "deterministic_seed": "0xdeadbeef_cafef00d",
+      "concurrency_shapes": ["N=1"],
+      "preservation_impact": [
+        "zig build test",
+        "zig build test-integration",
+        "benchmark-regression CI job (existing scenarios must not regress)"
+      ]
+    },
+    {
+      "id": "posting_iter_next_with_positions",
+      "layer": "comparison",
+      "file": "benchmarks/bench.zig",
+      "build_step": "bench",
+      "hot_path_refs": [
+        "src/segment.zig:451-479"
+      ],
+      "intent": "Decode one posting including positions from a pre-loaded 10,000-entry posting buffer. Paired with posting_iter_next_doc_only to isolate the position decode cost.",
+      "ops_per_iteration": 10000,
+      "warmups": 3,
+      "rounds": 30,
+      "metrics": ["wall_ns_p50", "throughput_ops_per_sec", "alloc_count"],
+      "zero_alloc_expected": false,
+      "alloc_probe_required": true,
+      "alloc_probe_plan": "pos_buf growth may occur on first call. After warmup, pos_buf is pre-sized and subsequent calls reuse capacity. alloc_count in sampled iterations should be 0 if tf is constant across all postings. Assert alloc_count==0 after warmup.",
+      "do_not_optimize_away_required": true,
+      "do_not_optimize_away_targets": ["posting.doc_id (u64)", "posting.positions.len (usize)"],
+      "workload_description": "Before timed body: construct a postings.bin-format byte buffer with 10,000 postings, each with tf=4, positions=[0,1,2,3] delta-encoded. Use a seeded PRNG for doc_id deltas (all delta=1 for simplicity). Construct a PostingIterator pointing at this buffer with df=10,000. Timed body: reset iterator to start, loop ops_per_iteration times calling next(), pass doc_id and positions.len to doNotOptimizeAway.",
+      "deterministic_seed": "0xdeadbeef_cafef00d",
+      "concurrency_shapes": ["N=1"],
+      "preservation_impact": ["zig build test (segment.zig unit tests must pass)"]
+    },
+    {
+      "id": "posting_iter_next_doc_only",
+      "layer": "comparison",
+      "file": "benchmarks/bench.zig",
+      "build_step": "bench",
+      "hot_path_refs": [
+        "src/segment.zig:491-515"
+      ],
+      "intent": "Same buffer as posting_iter_next_with_positions but calls nextDocOnly, skipping position decode. The throughput delta vs the paired scenario isolates per-position varint decode cost.",
+      "ops_per_iteration": 10000,
+      "warmups": 3,
+      "rounds": 30,
+      "metrics": ["wall_ns_p50", "throughput_ops_per_sec", "alloc_count"],
+      "zero_alloc_expected": true,
+      "alloc_probe_required": true,
+      "alloc_probe_plan": "nextDocOnly does not grow pos_buf. alloc_count must be 0 across all sampled iterations (including first sampled iteration, unlike next()). Assert strictly.",
+      "do_not_optimize_away_required": true,
+      "do_not_optimize_away_targets": ["doc_id (u64) returned by nextDocOnly"],
+      "workload_description": "Identical buffer and iterator setup as posting_iter_next_with_positions. Timed body calls nextDocOnly() instead of next(). Pass doc_id to doNotOptimizeAway.",
+      "deterministic_seed": "0xdeadbeef_cafef00d",
+      "concurrency_shapes": ["N=1"],
+      "preservation_impact": ["zig build test (segment.zig unit tests must pass)"]
+    }
+  ],
+
+  "new_files": [
+    {
+      "path": "benchmarks/micro/varint.zig",
+      "description": "Micro-benchmark suite for readVarInt and writeVarInt. Four scenarios: encode 1-byte, encode 10-byte, decode 1-byte, decode 10-byte.",
+      "build_step_to_add": "bench-micro-varint",
+      "exe_name": "fts-storage-micro-varint"
+    },
+    {
+      "path": "benchmarks/micro/bm25.zig",
+      "description": "Micro-benchmark suite for BM25 scoring arithmetic. Two scenarios: single-call score computation, 16-segment norm scan.",
+      "build_step_to_add": "bench-micro-bm25",
+      "exe_name": "fts-storage-micro-bm25"
+    },
+    {
+      "path": "benchmarks/micro/wal_record.zig",
+      "description": "Micro-benchmark for WalRecord.serializeInto with scratch buffer reuse.",
+      "build_step_to_add": "bench-micro-wal-record",
+      "exe_name": "fts-storage-micro-wal-record"
+    }
+  ],
+
+  "modified_files": [
+    {
+      "path": "benchmarks/bench.zig",
+      "change": "Extend scenarios array with: ingest_100k_docs_random_terms, flush_100k_term_memtable, replay_wal_1M_records, query_term_iterator_16_segments, posting_iter_next_with_positions, posting_iter_next_doc_only. Add corresponding RunFn bodies and helper functions."
+    },
+    {
+      "path": "build.zig",
+      "change": "Add bench-micro-varint, bench-micro-bm25, bench-micro-wal-record exe blocks modeled on micro_example_exe. Wire each into micro_all_step.dependOn(...)."
+    }
+  ],
+
+  "commands": {
+    "bench": "zig build bench",
+    "bench-with-output": "zig build bench -- --output benchmarks/results/latest.json",
+    "bench-micro": "zig build bench-micro",
+    "bench-micro-varint": "zig build bench-micro-varint",
+    "bench-micro-bm25": "zig build bench-micro-bm25",
+    "bench-micro-wal-record": "zig build bench-micro-wal-record",
+    "bench-compare": "zig build compare-bench -- --baseline benchmarks/results/baseline.json --current benchmarks/results/latest.json",
+    "bench-check": "zig build check",
+    "bench-list": "zig build bench -- --list",
+    "scale-bench": "zig build scale-bench"
+  },
+
+  "ab_protocol": {
+    "enabled": false,
+    "note": "A/B explicitly out of scope for this run. Protocol recorded for follow-up.",
+    "warmups": 3,
+    "rounds": 30,
+    "stress_multiplier": 20,
+    "variance_gate_multiplier": 3.0,
+    "fixed_floor_pct": 3.0,
+    "integration_fixed_floor_pct": 15.0,
+    "baseline_ref": "790aa13",
+    "comparison_ref": "HEAD"
+  },
+
+  "preservation": [
+    {
+      "target": "zig build test",
+      "description": "Unit tests for all src/ modules. Must pass at HEAD after all new files are added.",
+      "ci_job": "zig-test-unit-debug-0.16.0"
+    },
+    {
+      "target": "zig build test-integration",
+      "description": "Integration and fault-injection tests. Must pass.",
+      "ci_job": "zig-test-integration-0.16.0"
+    },
+    {
+      "target": "zig build check",
+      "description": "Compile-only check for all test artifacts including new bench files. Must produce zero errors.",
+      "ci_job": "zig-build-0.16.0"
+    },
+    {
+      "target": "zig build compare-bench -- --baseline benchmarks/results/baseline.json --current benchmarks/results/ci-current.json",
+      "description": "Regression gate against the committed baseline.json. Existing two scenarios (engine_init_cycle, engine_index_document) must not regress beyond noise gate.",
+      "ci_job": "benchmark-regression"
+    },
+    {
+      "target": "zig build bench-micro",
+      "description": "All micro benchmarks including new ones. Must run to completion without error.",
+      "ci_job": "bench-micro"
+    }
+  ],
+
+  "acceptance_criteria": [
+    "zig build check exits 0 with all new files in place (benchmarks/micro/varint.zig, benchmarks/micro/bm25.zig, benchmarks/micro/wal_record.zig, modified benchmarks/bench.zig, modified build.zig)",
+    "zig build bench -- --list output contains all 13 new scenario names plus the 2 existing ones (15 total)",
+    "zig build bench-micro-varint exits 0 and prints 4 scenario result lines",
+    "zig build bench-micro-bm25 exits 0 and prints 2 scenario result lines",
+    "zig build bench-micro-wal-record exits 0 and prints 1 scenario result line",
+    "zig build bench -- --filter varint exits 0 (no varint scenarios in bench.zig, filter produces empty run without error)",
+    "zig build bench -- --output benchmarks/results/latest.json exits 0 and writes a valid ResultDocument JSON with 8 rows (2 existing + 6 new integration/comparison scenarios)",
+    "zig build compare-bench -- --baseline benchmarks/results/baseline.json --current benchmarks/results/latest.json exits 0 with no FAIL lines (new scenarios produce 'no baseline row, skipping' which is not a failure)",
+    "zero-alloc scenarios (varint_encode_1byte, varint_encode_10byte, varint_decode_1byte, varint_decode_10byte, bm25_score_single, bm25_score_norm_scan_16seg, posting_iter_next_doc_only) each emit alloc_count=0 in the JSON output",
+    "wal_record_serialize_into emits alloc_count=0 in sampled result rows (warmup allocations do not appear in the output)",
+    "zig build test exits 0 (no existing tests broken by new code)",
+    "zig build test-integration exits 0"
+  ],
+
+  "baseline_update_policy": {
+    "note": "Do NOT update benchmarks/results/baseline.json in this implementation run. New scenarios will produce 'no baseline row, skipping' from compare.zig on first run. After three stable CI runs with consistent medians, add new scenario rows to baseline.json in a deliberate follow-up commit with message: perf(bench): refresh baseline after bench-coverage-expansion"
+  }
+}
