@@ -57,6 +57,23 @@ pub const Engine = struct {
     /// scanning every segment per matched doc (PERF-0006, WRK-031).
     all_tombstones: std.AutoHashMapUnmanaged(u64, void) = .empty,
 
+    /// Engine-wide aggregated per-doc length map. Built at init by walking
+    /// every segment's `norms` map in segments-list order (oldest segment
+    /// first); updated on flush by inserting the new segment's norms.
+    /// Insertion uses `getOrPutValue`, so the first segment to record a norm
+    /// for a given doc_id wins — matching the historical break-on-first-match
+    /// loop in `TermIterator.computeScore` (`src/search.zig:208-214`).
+    ///
+    /// Lets `computeScore`'s per-doc length lookup run in O(1) instead of
+    /// O(segments). At 16 segments the bench `bm25_score_norm_scan_16seg`
+    /// reports ~19.5 MOPS vs ~2.2 GOPS for the single-segment formula —
+    /// fundamentally the wrong shape for any non-toy query path.
+    ///
+    /// Memtable docs (between flushes) are intentionally absent here; the
+    /// computeScore call site falls back to `limits.DEFAULT_DOC_LEN` in
+    /// that case, preserving the prior behavior bit-for-bit.
+    all_norms: std.AutoHashMapUnmanaged(u64, u32) = .empty,
+
     wal_file: std.Io.File,
     wal_writer: wal.WalWriter,
     next_txn_id: u64 = 1,
@@ -144,6 +161,8 @@ pub const Engine = struct {
         }
         engine.all_tombstones = .empty;
         errdefer engine.all_tombstones.deinit(allocator);
+        engine.all_norms = .empty;
+        errdefer engine.all_norms.deinit(allocator);
 
         // Ensure subdirectories exist. Dir mode 0o700 (owner-only) keeps the
         // WAL and segment data unreadable to other local users on POSIX
@@ -297,6 +316,20 @@ pub const Engine = struct {
             try engine.all_tombstones.put(allocator, entry.key_ptr.*, {});
         }
 
+        // Build the engine-wide aggregated norms map so BM25's per-doc length
+        // lookup is O(1) instead of O(segments). Walk segments in
+        // segments-list order (oldest first) using `getOrPutValue` so the
+        // first segment to record a norm for a given doc_id wins — matching
+        // the historical break-on-first-match semantics in
+        // `TermIterator.computeScore`. Memtable docs are intentionally absent;
+        // computeScore falls back to `limits.DEFAULT_DOC_LEN` for those.
+        for (engine.segments.items) |*seg_reader| {
+            var n_it = seg_reader.norms.iterator();
+            while (n_it.next()) |entry| {
+                _ = try engine.all_norms.getOrPutValue(allocator, entry.key_ptr.*, entry.value_ptr.*);
+            }
+        }
+
         // Open WAL for writing
         engine.wal_file = try engine.wal_dir.createFile(io, "fts.wal", .{
             .truncate = false,
@@ -340,6 +373,7 @@ pub const Engine = struct {
         self.current_manifest.deinit(self.allocator);
         self.memtable.deinit();
         self.all_tombstones.deinit(self.allocator);
+        self.all_norms.deinit(self.allocator);
         self.allocator.destroy(self);
     }
 
@@ -872,6 +906,14 @@ pub const Engine = struct {
         );
         try self.segments.append(self.allocator, seg_reader);
 
+        // Fold the new segment's norms into the engine-wide aggregated map.
+        // First-write-wins (`getOrPutValue`) preserves the historical
+        // break-on-first-match semantics from the per-segment scan loop.
+        var n_it = self.segments.items[self.segments.items.len - 1].norms.iterator();
+        while (n_it.next()) |entry| {
+            _ = try self.all_norms.getOrPutValue(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
+        }
+
         // Clear memtable.
         self.memtable.deinit();
         self.memtable = segment.Memtable.init(self.allocator);
@@ -977,6 +1019,16 @@ pub const Engine = struct {
         // exclusion, so drop them.
         self.all_tombstones.deinit(self.allocator);
         self.all_tombstones = .empty;
+
+        // Rebuild the aggregated norms map from the merged segment. The
+        // historical first-segment-wins semantics is trivially preserved
+        // because there is only one segment left after compact.
+        self.all_norms.deinit(self.allocator);
+        self.all_norms = .empty;
+        var n_it = self.segments.items[0].norms.iterator();
+        while (n_it.next()) |entry| {
+            try self.all_norms.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
+        }
     }
 };
 
@@ -1045,6 +1097,63 @@ test "Engine index, flush, and recover" {
         // WAL replayed doc 3
         try std.testing.expectEqual(@as(usize, 1), eng3.memtable.dictionary.count());
         try std.testing.expect(eng3.memtable.dictionary.contains("test"));
+    }
+}
+
+test "Engine.all_norms aggregates across segments" {
+    // BM25 norm lookup uses an engine-wide aggregated map (O(1)) instead of
+    // a per-segment scan (O(segments)). This test pins three behaviors:
+    //   1. On flush, the new segment's norms are folded into all_norms.
+    //   2. First-segment-wins semantics is preserved across multi-segment
+    //      writes — the oldest segment's value wins for shared doc_ids.
+    //   3. On re-open, all_norms is rebuilt from disk.
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    {
+        var eng = try Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+
+        // Segment 0: doc 1 with 3 positions (norm=3), doc 2 with 1 position
+        const t1a = TermPosting{ .term = "alpha", .positions = &[_]u32{ 0, 1, 2 } };
+        const t1b = TermPosting{ .term = "beta", .positions = &[_]u32{0} };
+        try eng.indexDocument(1, &[_]TermPosting{t1a});
+        try eng.indexDocument(2, &[_]TermPosting{t1b});
+        try eng.flush();
+
+        // After first flush, all_norms must hold both doc lengths.
+        try std.testing.expectEqual(@as(?u32, 3), eng.all_norms.get(1));
+        try std.testing.expectEqual(@as(?u32, 1), eng.all_norms.get(2));
+
+        // Segment 1: doc 3 (norm=2), and doc 1 re-indexed with 5 positions.
+        const t2a = TermPosting{ .term = "alpha", .positions = &[_]u32{ 10, 11, 12, 13, 14 } };
+        const t2b = TermPosting{ .term = "gamma", .positions = &[_]u32{ 0, 1 } };
+        try eng.indexDocument(1, &[_]TermPosting{t2a});
+        try eng.indexDocument(3, &[_]TermPosting{t2b});
+        try eng.flush();
+
+        // After second flush: doc 1 is in BOTH segments but the older
+        // segment's value wins (3, not 5) — first-segment-wins semantics.
+        try std.testing.expectEqual(@as(?u32, 3), eng.all_norms.get(1));
+        try std.testing.expectEqual(@as(?u32, 1), eng.all_norms.get(2));
+        try std.testing.expectEqual(@as(?u32, 2), eng.all_norms.get(3));
+
+        // Memtable doc is intentionally absent from all_norms (norms are
+        // computed at flush time only). DEFAULT_DOC_LEN fallback applies.
+        const t3 = TermPosting{ .term = "delta", .positions = &[_]u32{ 0, 1, 2, 3 } };
+        try eng.indexDocument(4, &[_]TermPosting{t3});
+        try std.testing.expectEqual(@as(?u32, null), eng.all_norms.get(4));
+    }
+
+    {
+        // Re-open: all_norms must rebuild from disk (init walks segments).
+        var eng = try Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        try std.testing.expectEqual(@as(?u32, 3), eng.all_norms.get(1));
+        try std.testing.expectEqual(@as(?u32, 1), eng.all_norms.get(2));
+        try std.testing.expectEqual(@as(?u32, 2), eng.all_norms.get(3));
     }
 }
 

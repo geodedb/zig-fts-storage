@@ -202,16 +202,13 @@ pub const TermIterator = struct {
         else
             @floatFromInt(avg_dl_raw);
 
-        // Look up per-doc length in any segment that has a norm for this
-        // doc; fall back to DEFAULT_DOC_LEN if absent (memtable doc, or
-        // pre-WRK-035 segment without norms.bin).
-        var dl_u32: u32 = limits.DEFAULT_DOC_LEN;
-        for (self.eng.segments.items) |*seg| {
-            if (seg.norms.get(doc_id)) |n| {
-                dl_u32 = n;
-                break;
-            }
-        }
+        // Look up per-doc length via the engine-wide aggregated norms map
+        // (O(1)); fall back to DEFAULT_DOC_LEN if absent (memtable doc, or
+        // pre-WRK-035 segment without norms.bin). The aggregated map is
+        // built at init / refreshed on flush / compact in engine.zig and
+        // preserves the historical first-segment-wins semantics via
+        // `getOrPutValue` (PERF — bm25 norm scan).
+        const dl_u32: u32 = self.eng.all_norms.get(doc_id) orelse limits.DEFAULT_DOC_LEN;
         const dl: f32 = @floatFromInt(dl_u32);
 
         const tf_f: f32 = @floatFromInt(tf);
