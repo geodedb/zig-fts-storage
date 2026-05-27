@@ -170,7 +170,23 @@ pub const Engine = struct {
         defer file.close(self.io);
 
         var reader = wal.WalReader.init(self.io, file, self.allocator);
-        while (try reader.next()) |rec| {
+        // A crash mid-WAL-write is normal: recovery must truncate at the last
+        // good record rather than abort. Treat Incomplete / EndOfStream /
+        // ChecksumMismatch as the signal that the durable tail has ended
+        // (PERF-0014, PERF-0019, SEC-EXT-0211, SEC-EXT-0212). InvalidData
+        // (unknown record type) is skipped for forward-compat — a future
+        // version that emits a new record type must not brick rollback to an
+        // older binary.
+        while (true) {
+            const rec_opt = reader.next() catch |err| switch (err) {
+                error.Incomplete,
+                error.EndOfStream,
+                error.ChecksumMismatch,
+                => break,
+                error.InvalidData => continue,
+                else => return err,
+            };
+            const rec = rec_opt orelse break;
             var r = rec;
             defer r.deinit(self.allocator);
 
@@ -428,5 +444,41 @@ test "Engine index, flush, and recover" {
         // WAL replayed doc 3
         try std.testing.expectEqual(@as(usize, 1), eng3.memtable.dictionary.count());
         try std.testing.expect(eng3.memtable.dictionary.contains("test"));
+    }
+}
+
+test "Engine.init tolerates truncated WAL tail" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // Phase A: index 3 docs, then deliberately truncate the WAL mid-record.
+    {
+        var eng = try Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        const t = TermPosting{ .term = "x", .positions = &[_]u32{1} };
+        try eng.indexDocument(1, &[_]TermPosting{t});
+        try eng.indexDocument(2, &[_]TermPosting{t});
+        try eng.indexDocument(3, &[_]TermPosting{t});
+    }
+
+    // Truncate the WAL by 3 bytes (well inside the last record's CRC region)
+    // to simulate a crash mid-write.
+    {
+        var wal_dir = try tmp_dir.dir.openDir(io, "wal", .{});
+        defer wal_dir.close(io);
+        const f = try wal_dir.openFile(io, "fts.wal", .{ .mode = .read_write });
+        defer f.close(io);
+        const sz = (try f.stat(io)).size;
+        try f.setLength(io, sz - 3);
+    }
+
+    // Phase B: reopen — must succeed; recovery should find at least the first
+    // doc (the last record is torn, earlier ones must replay cleanly).
+    {
+        var eng = try Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        try std.testing.expect(eng.memtable.dictionary.contains("x"));
     }
 }
