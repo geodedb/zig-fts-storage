@@ -54,8 +54,37 @@ pub const TermIterator = struct {
     auth_filter: ?AuthFilter = null,
     auth_ctx: ?*anyopaque = null,
 
+    /// A single (doc_id, positions, score) match yielded by `TermIterator`.
+    ///
+    /// HIGHLIGHTING (GAP-0002): `positions` is the authoritative highlight
+    /// contract. Each entry is the token-position (NOT the byte offset) of
+    /// one occurrence of `term` inside `doc_id`. To render byte-offset
+    /// highlights for display:
+    ///
+    /// 1. The caller already tokenized the document at index time and
+    ///    supplied positions to `indexDocument`. The same tokenizer must
+    ///    be available at query time.
+    /// 2. Re-tokenize the original document, recording byte ranges for
+    ///    each emitted token in addition to the position counter.
+    /// 3. For each `pos` in `positions`, look up the byte range for the
+    ///    token whose position equals `pos`.
+    /// 4. Compose the snippet by slicing the original text around the
+    ///    matched byte ranges, with the caller's preferred context window
+    ///    (e.g. ±40 chars) and ellipsis policy.
+    ///
+    /// The library deliberately does NOT store byte offsets alongside
+    /// positions: token-position is the unit BM25 scores against and the
+    /// unit phrase queries align on, so storing both would double the
+    /// segment size for a renderer concern that already has all the
+    /// information it needs in the original document plus the tokenizer.
+    /// Callers who don't tokenize symmetrically (e.g. they index on
+    /// stemmed tokens but want to highlight surface forms) must keep
+    /// their own token-position to byte-offset map outside the engine.
     pub const Match = struct {
         doc_id: u64,
+        /// Token-position (not byte offset) of each occurrence of the term
+        /// in the document. Sorted ascending. See the doc comment above
+        /// for the highlight contract.
         positions: []const u32,
         /// BM25 relevance score for this (term, doc) match. Higher is more
         /// relevant. Computed from term frequency, document length, the
