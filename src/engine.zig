@@ -553,3 +553,38 @@ test "Engine.init tolerates truncated WAL tail" {
         try std.testing.expect(eng.memtable.dictionary.contains("x"));
     }
 }
+
+test "Engine.init fails closed when both manifests corrupt" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // Bootstrap a valid engine and flush twice so both manifest.a and
+    // manifest.b exist on disk (the manifest A/B rotation alternates by
+    // counter parity, so two flushes guarantees both slots are populated).
+    {
+        var eng = try Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        const t = TermPosting{ .term = "x", .positions = &[_]u32{1} };
+        try eng.indexDocument(1, &[_]TermPosting{t});
+        try eng.flush();
+        try eng.indexDocument(2, &[_]TermPosting{t});
+        try eng.flush();
+    }
+
+    // Corrupt both manifest files in place. Flipping the trailing byte
+    // breaks the CRC suffix that loadManifest validates.
+    const corrupt_byte = [_]u8{0xFF};
+    for ([_][]const u8{ "manifest.a", "manifest.b" }) |name| {
+        const f = tmp_dir.dir.openFile(io, name, .{ .mode = .read_write }) catch continue;
+        defer f.close(io);
+        const sz = (try f.stat(io)).size;
+        try f.writePositionalAll(io, &corrupt_byte, sz - 1);
+    }
+
+    // Reopen — must fail loud, not silently start fresh. Silent fail-open
+    // here would drop every previously flushed segment from view, masking
+    // tampering or storage corruption (SEC-EXT-0304, GAP-0028).
+    try std.testing.expectError(error.ManifestCorrupt, Engine.init(io, alloc, tmp_dir.dir));
+}
