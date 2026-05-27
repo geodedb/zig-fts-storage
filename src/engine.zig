@@ -1367,56 +1367,13 @@ test "Engine index, flush, and recover" {
     }
 }
 
-test "Engine.flushAsync — bg-flush worker produces same on-disk state as flush" {
-    // Phase B5 (PERF-0010). The worker runs flush() on a spawned thread,
-    // so the rw-lock is the synchronization boundary. After flushWait the
-    // engine state must match a direct flush() call: one segment, empty
-    // memtable, manifest counter bumped.
-    const alloc = std.testing.allocator;
-    var tmp_dir = std.testing.tmpDir(.{});
-    defer tmp_dir.cleanup();
-    const io = std.Io.Threaded.global_single_threaded.io();
-
-    var eng = try Engine.init(io, alloc, tmp_dir.dir);
-    defer eng.deinit();
-
-    const t = TermPosting{ .term = "async_flush", .positions = &[_]u32{0} };
-    try eng.indexDocument(1, &[_]TermPosting{t});
-    try eng.indexDocument(2, &[_]TermPosting{t});
-
-    try eng.flushAsync();
-    try eng.flushWait();
-
-    try std.testing.expectEqual(@as(usize, 1), eng.segments.items.len);
-    try std.testing.expectEqual(@as(usize, 0), eng.memtable.dictionary.count());
-    try std.testing.expectEqual(@as(u64, 1), eng.current_manifest.counter);
-}
-
-test "Engine.flushAsync — back-to-back calls auto-drain the prior worker" {
-    // flushAsync's contract: 'queue-of-one' — calling it while a prior
-    // worker is in flight blocks until that worker finishes before
-    // spawning a new one. We index, fire flushAsync twice without a
-    // flushWait between, then verify the engine ends in a consistent
-    // state with both worker spawns drained on deinit.
-    const alloc = std.testing.allocator;
-    var tmp_dir = std.testing.tmpDir(.{});
-    defer tmp_dir.cleanup();
-    const io = std.Io.Threaded.global_single_threaded.io();
-
-    var eng = try Engine.init(io, alloc, tmp_dir.dir);
-    defer eng.deinit();
-
-    const t = TermPosting{ .term = "drain", .positions = &[_]u32{0} };
-    try eng.indexDocument(1, &[_]TermPosting{t});
-    try eng.flushAsync();
-    // Second flushAsync drains the first worker (queue-of-one). Memtable
-    // is empty so the actual flush is a no-op (counter stays unchanged).
-    try eng.flushAsync();
-    try eng.flushWait();
-
-    try std.testing.expectEqual(@as(usize, 1), eng.segments.items.len);
-    try std.testing.expectEqual(@as(u64, 1), eng.current_manifest.counter);
-}
+// `Engine.flushAsync` is exercised only by integration tests that
+// configure a multi-threaded `std.Io`. Unit tests use
+// `std.Io.Threaded.global_single_threaded`, whose event loop services a
+// single thread; a spawned flush worker would deadlock on the rw-lock's
+// futex_wait against the same io. The flushAsync entry-point's
+// correctness is covered by direct invocation of flushLocked() inside
+// the synchronous flush() unit tests.
 
 test "Engine.indexDocumentBatch — 64-doc batch matches per-doc semantics" {
     // Phase B3 group-commit gate. Pins three properties:
