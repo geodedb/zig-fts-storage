@@ -114,6 +114,12 @@ pub const WalWriter = struct {
     /// records) is a follow-up — this change only removes the per-record
     /// alloc/free churn without touching durability semantics.
     scratch: std.ArrayListUnmanaged(u8) = .empty,
+    /// Optional HMAC-SHA256 key. When non-null, every appended record is
+    /// followed by a 32-byte HMAC tag computed over the existing
+    /// `serializeInto` bytes (which already include CRC32C). Default null
+    /// preserves the pre-WRK-037 on-disk format byte-for-byte
+    /// (SEC-02, SEC-EXT-0401, GAP-0027).
+    hmac_key: ?[]const u8 = null,
 
     pub fn init(io: std.Io, file: std.Io.File, allocator: Allocator) !WalWriter {
         const stat = try file.stat(io);
@@ -125,6 +131,17 @@ pub const WalWriter = struct {
         };
     }
 
+    pub fn initWithHmac(
+        io: std.Io,
+        file: std.Io.File,
+        allocator: Allocator,
+        hmac_key: ?[]const u8,
+    ) !WalWriter {
+        var w = try WalWriter.init(io, file, allocator);
+        w.hmac_key = hmac_key;
+        return w;
+    }
+
     pub fn deinit(self: *WalWriter) void {
         self.scratch.deinit(self.allocator);
     }
@@ -132,6 +149,19 @@ pub const WalWriter = struct {
     pub fn append(self: *WalWriter, record: WalRecord) !void {
         self.scratch.clearRetainingCapacity();
         try record.serializeInto(self.allocator, &self.scratch);
+
+        // HMAC-SHA256 envelope when configured (SEC-02, SEC-EXT-0401,
+        // GAP-0027). The tag is computed over the entire serialized record
+        // — header + payload + CRC — and appended as 32 trailing bytes.
+        // Without a key the bytes on disk are unchanged from the pre-WRK-037
+        // format, so existing data files and tests remain valid.
+        if (self.hmac_key) |key| {
+            const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
+            var tag: [Hmac.mac_length]u8 = undefined;
+            Hmac.create(&tag, self.scratch.items, key);
+            try self.scratch.appendSlice(self.allocator, &tag);
+        }
+
         try self.file.writePositionalAll(self.io, self.scratch.items, self.offset);
         self.offset += self.scratch.items.len;
     }
@@ -145,6 +175,11 @@ pub const WalReader = struct {
     file: std.Io.File,
     allocator: Allocator,
     io: std.Io,
+    /// Optional HMAC-SHA256 key. When non-null, every record is expected to
+    /// be followed by a 32-byte HMAC tag — `next()` reads and verifies it,
+    /// returning `error.HmacMismatch` on failure. Default null preserves the
+    /// pre-WRK-037 wire format (SEC-02, SEC-EXT-0401, GAP-0027).
+    hmac_key: ?[]const u8 = null,
 
     pub fn init(io: std.Io, file: std.Io.File, allocator: Allocator) WalReader {
         return .{
@@ -152,6 +187,17 @@ pub const WalReader = struct {
             .file = file,
             .allocator = allocator,
         };
+    }
+
+    pub fn initWithHmac(
+        io: std.Io,
+        file: std.Io.File,
+        allocator: Allocator,
+        hmac_key: ?[]const u8,
+    ) WalReader {
+        var r = WalReader.init(io, file, allocator);
+        r.hmac_key = hmac_key;
+        return r;
     }
 
     /// Reads the next WAL record from the file.
@@ -196,6 +242,25 @@ pub const WalReader = struct {
         const computed_crc = hasher.final();
 
         if (stored_crc != computed_crc) return error.ChecksumMismatch;
+
+        // Optional HMAC-SHA256 envelope (SEC-02, SEC-EXT-0401, GAP-0027).
+        // The tag is computed over (header || payload || crc) at write time,
+        // so we re-compute over the same bytes here.
+        if (self.hmac_key) |key| {
+            const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
+            var stored_tag: [Hmac.mac_length]u8 = undefined;
+            var tag_iov = [_][]u8{&stored_tag};
+            const read_tag = try self.file.readStreaming(self.io, &tag_iov);
+            if (read_tag < Hmac.mac_length) return error.Incomplete;
+
+            var computed_tag: [Hmac.mac_length]u8 = undefined;
+            var hmac_ctx = Hmac.init(key);
+            hmac_ctx.update(&header_buf);
+            hmac_ctx.update(payload_and_crc);
+            hmac_ctx.final(&computed_tag);
+
+            if (!std.mem.eql(u8, &stored_tag, &computed_tag)) return error.HmacMismatch;
+        }
 
         const payload_copy = try self.allocator.dupe(u8, payload);
 

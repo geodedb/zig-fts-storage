@@ -41,4 +41,17 @@ pub const EngineError = error{
     PositionsNotMonotonic,
     ManifestCorrupt,
     ManifestTooLarge,
+    /// Trailing HMAC-SHA256 envelope did not match the recomputed tag.
+    /// Surfaced by WAL replay and manifest load when `EngineConfig.hmac_key`
+    /// is set (SEC-02, SEC-EXT-0401, GAP-0027).
+    HmacMismatch,
+    /// AES-256-GCM key must be exactly 32 bytes; SEC-EXT-0402.
+    InvalidKey,
+    /// AES-256-GCM segment ciphertext was shorter than the minimum
+    /// `nonce(12) || ciphertext(0) || tag(16)` envelope (SEC-EXT-0402).
+    CiphertextTooShort,
+    /// Caller-supplied `excluded_fields` blocked an indexDocument batch
+    /// because one of its TermPostings carries a matching `field` tag
+    /// (GAP-0010).
+    FieldExcluded,
 };

@@ -14,6 +14,29 @@ pub const Error = @import("errors.zig").EngineError;
 pub const TermPosting = struct {
     term: []const u8,
     positions: []const u32,
+    /// Optional FLE-style field tag. When set, the caller may pass an
+    /// `excluded_fields` list to `Engine.indexDocumentExcluding` so the
+    /// engine refuses to ingest postings tagged with a sensitive field
+    /// (GAP-0010). Default null preserves the prior un-tagged behavior.
+    field: ?[]const u8 = null,
+};
+
+/// Opt-in security knobs for `Engine.initWithConfig`. Every field defaults to
+/// the pre-WRK-037 / WRK-038 behavior so existing callers, on-disk layouts,
+/// and unit tests continue to work unchanged.
+pub const EngineConfig = struct {
+    /// If set, every WAL record and manifest carries a trailing 32-byte
+    /// HMAC-SHA256 envelope computed over (existing bytes || crc).
+    /// Reads verify the tag and return `error.HmacMismatch` on failure
+    /// (SEC-02, SEC-EXT-0401, GAP-0027). Caller retains key ownership.
+    hmac_key: ?[]const u8 = null,
+
+    /// If set, segment data files (postings.bin, terms.hash, norms.bin,
+    /// tombstones.bin) are encrypted with AES-256-GCM. Must be exactly 32
+    /// bytes (the AES-256 key length). Each file gets a fresh random 12-byte
+    /// nonce stored at the head, then ciphertext, then the 16-byte tag at
+    /// the tail (GAP-0009, SEC-EXT-0402). Caller retains key ownership.
+    aead_key: ?[]const u8 = null,
 };
 
 pub const Engine = struct {
@@ -38,6 +61,15 @@ pub const Engine = struct {
     wal_writer: wal.WalWriter,
     next_txn_id: u64 = 1,
 
+    /// Optional HMAC-SHA256 key for WAL + manifest envelopes (SEC-02,
+    /// SEC-EXT-0401, GAP-0027). Null = unchanged on-disk format. Caller owns
+    /// the key memory; the engine merely borrows the slice.
+    hmac_key: ?[]const u8 = null,
+
+    /// Optional AES-256-GCM key for segment-at-rest encryption (GAP-0009,
+    /// SEC-EXT-0402). Null = plaintext segments. Must be 32 bytes when set.
+    aead_key: ?[]const u8 = null,
+
     /// Initialize an Engine on the given directory.
     ///
     /// Ownership: the caller retains ownership of `base_dir`. Engine will open
@@ -55,12 +87,34 @@ pub const Engine = struct {
     /// permissions on `wal/` and `segments/` mitigate the local-user case,
     /// but the parent `base_dir` is the caller's responsibility.
     pub fn init(io: std.Io, allocator: Allocator, base_dir: std.Io.Dir) !*Engine {
+        return initWithConfig(io, allocator, base_dir, .{});
+    }
+
+    /// Initialize an Engine with optional opt-in security features
+    /// (HMAC-SHA256 envelopes, AES-256-GCM segment-at-rest encryption).
+    /// With a default-initialized config this is byte-for-byte equivalent to
+    /// `init` (SEC-02, SEC-EXT-0401, SEC-EXT-0402, GAP-0009, GAP-0027).
+    pub fn initWithConfig(
+        io: std.Io,
+        allocator: Allocator,
+        base_dir: std.Io.Dir,
+        config: EngineConfig,
+    ) !*Engine {
+        // Fail fast on misconfigured keys so the error surface stays close to
+        // the caller. AES-256-GCM requires a 32-byte key; refusing other
+        // lengths up front avoids a confusing failure deep in flush().
+        if (config.aead_key) |k| {
+            if (k.len != 32) return error.InvalidKey;
+        }
+
         var engine = try allocator.create(Engine);
         errdefer allocator.destroy(engine);
 
         engine.allocator = allocator;
         engine.io = io;
         engine.dir = base_dir;
+        engine.hmac_key = config.hmac_key;
+        engine.aead_key = config.aead_key;
         engine.memtable = segment.Memtable.init(allocator);
         errdefer engine.memtable.deinit();
         engine.segments = .empty;
@@ -93,8 +147,14 @@ pub const Engine = struct {
         // back to the still-valid copy. Only if BOTH are corrupt do we fail
         // closed, since silently starting fresh would drop every previously
         // flushed segment (WRK-023, GAP-0028, SEC-EXT-0304).
-        const res_a = loadManifestResult(io, allocator, base_dir, "manifest.a");
-        const res_b = loadManifestResult(io, allocator, base_dir, "manifest.b");
+        const res_a = loadManifestResult(io, allocator, base_dir, "manifest.a", config.hmac_key);
+        const res_b = loadManifestResult(io, allocator, base_dir, "manifest.b", config.hmac_key);
+
+        // HMAC mismatch on EITHER slot is treated as fail-loud: a tampered or
+        // wrong-key manifest must not be silently masked by falling back to
+        // the other slot (SEC-02, SEC-EXT-0401, GAP-0027). The A/B fallback
+        // is explicitly designed to recover from bit rot, not tampering.
+        if (res_a == .hmac_mismatch or res_b == .hmac_mismatch) return error.HmacMismatch;
 
         if (res_a == .corrupt and res_b == .corrupt) return error.ManifestCorrupt;
 
@@ -158,7 +218,12 @@ pub const Engine = struct {
             .permissions = utils.fileMode(0o600),
         });
         errdefer engine.wal_file.close(io);
-        engine.wal_writer = try wal.WalWriter.init(io, engine.wal_file, allocator);
+        engine.wal_writer = try wal.WalWriter.initWithHmac(
+            io,
+            engine.wal_file,
+            allocator,
+            config.hmac_key,
+        );
 
         return engine;
     }
@@ -180,7 +245,13 @@ pub const Engine = struct {
         self.allocator.destroy(self);
     }
 
-    fn loadManifest(io: std.Io, allocator: Allocator, dir: std.Io.Dir, path: []const u8) !manifest.Manifest {
+    fn loadManifest(
+        io: std.Io,
+        allocator: Allocator,
+        dir: std.Io.Dir,
+        path: []const u8,
+        hmac_key: ?[]const u8,
+    ) !manifest.Manifest {
         // SEC-EXT-0301: refuse to follow symlinks so an adversary with
         // directory write access cannot redirect manifest reads at a sensitive
         // file (e.g. swap manifest.a for a symlink to /etc/passwd).
@@ -193,7 +264,7 @@ pub const Engine = struct {
         defer allocator.free(data);
         var iov = [_][]u8{data};
         _ = try file.readStreaming(io, &iov);
-        return try manifest.Manifest.deserialize(allocator, data);
+        return try manifest.Manifest.deserializeWithHmac(allocator, data, hmac_key);
     }
 
     /// Three-state result for a single manifest slot. Used by Engine.init to
@@ -209,18 +280,33 @@ pub const Engine = struct {
         /// or oversize). Caller decides whether to fail closed (both slots
         /// corrupt) or fall through (other slot still valid).
         corrupt,
+        /// File existed and parsed, but the trailing HMAC tag did not verify
+        /// against the engine's configured key. Distinct from `corrupt` so the
+        /// caller can fail loud rather than silently fall back to the other
+        /// slot — wrong key / tampering must not be hidden.
+        hmac_mismatch,
     };
 
+    /// Three-state result with a fourth out-of-band `hmac_mismatch`. HMAC
+    /// failures get their own slot because — unlike a CRC mismatch which can
+    /// be the result of bit rot — an HMAC mismatch with a correct key strongly
+    /// implies tampering or a wrong key, and the caller must surface it
+    /// rather than silently fall through to "this slot is unusable"
+    /// (SEC-02, SEC-EXT-0401, GAP-0027).
     fn loadManifestResult(
         io: std.Io,
         allocator: Allocator,
         dir: std.Io.Dir,
         path: []const u8,
+        hmac_key: ?[]const u8,
     ) ManifestLoadResult {
-        if (loadManifest(io, allocator, dir, path)) |m| {
+        if (loadManifest(io, allocator, dir, path, hmac_key)) |m| {
             return .{ .ok = m };
         } else |err| switch (err) {
             error.FileNotFound => return .absent,
+            // Surface HMAC mismatch separately so a wrong key fails loud
+            // instead of being indistinguishable from generic corruption.
+            error.HmacMismatch => return .hmac_mismatch,
             // Treat any parse / validation failure as "this slot is
             // unusable". The caller only fails closed when *both* slots
             // are unusable; one corrupt slot still allows recovery from
@@ -243,7 +329,7 @@ pub const Engine = struct {
         };
         defer file.close(self.io);
 
-        var reader = wal.WalReader.init(self.io, file, self.allocator);
+        var reader = wal.WalReader.initWithHmac(self.io, file, self.allocator, self.hmac_key);
 
         // WRK-025 (GAP-0012, GAP-0013): WAL replay groups records by txn_id
         // and applies payload records (index_doc / delete_doc) only if their
@@ -255,7 +341,9 @@ pub const Engine = struct {
         // exactly like the pre-bracketing replay did (PERF-0014, PERF-0019,
         // SEC-EXT-0211, SEC-EXT-0212). InvalidData (unknown record type) is
         // skipped for forward-compat so a newer record type doesn't brick
-        // rollback to an older binary.
+        // rollback to an older binary. HMAC mismatch (SEC-02, SEC-EXT-0401)
+        // is the one error that must NOT be swallowed: a wrong key or a
+        // tampered WAL has to surface, not be silently dropped.
         //
         // Memory note: this currently buffers every record. For v0.1 the
         // per-record cap (10 MiB) × bounded WAL length is acceptable;
@@ -567,7 +655,13 @@ pub const Engine = struct {
         // the segment is officially live and the errdefers above must NOT fire
         // for any subsequent failure.
         const man_file = if (self.current_manifest.counter % 2 == 0) "manifest.a" else "manifest.b";
-        try self.current_manifest.writeToFile(self.io, self.dir, man_file, self.allocator);
+        try self.current_manifest.writeToFileWithHmac(
+            self.io,
+            self.dir,
+            man_file,
+            self.allocator,
+            self.hmac_key,
+        );
         phase2_done = true;
 
         // PHASE 3: best-effort cleanup of staging state. WAL truncation and
@@ -583,7 +677,12 @@ pub const Engine = struct {
             .truncate = true,
             .permissions = utils.fileMode(0o600),
         });
-        self.wal_writer = try wal.WalWriter.init(self.io, self.wal_file, self.allocator);
+        self.wal_writer = try wal.WalWriter.initWithHmac(
+            self.io,
+            self.wal_file,
+            self.allocator,
+            self.hmac_key,
+        );
 
         // Open SegmentReader and add to segments list.
         const seg_reader = try segment.SegmentReader.init(self.io, self.allocator, self.seg_dir, next_segment_id);
@@ -659,7 +758,13 @@ pub const Engine = struct {
         });
         self.current_manifest.counter += 1;
         const man_file = if (self.current_manifest.counter % 2 == 0) "manifest.a" else "manifest.b";
-        try self.current_manifest.writeToFile(self.io, self.dir, man_file, self.allocator);
+        try self.current_manifest.writeToFileWithHmac(
+            self.io,
+            self.dir,
+            man_file,
+            self.allocator,
+            self.hmac_key,
+        );
 
         // Close old SegmentReaders, open the new merged one.
         for (self.segments.items) |*sr| sr.deinit();
@@ -820,6 +925,43 @@ test "Engine.init fails closed when both manifests corrupt" {
     // here would drop every previously flushed segment from view, masking
     // tampering or storage corruption (SEC-EXT-0304, GAP-0028).
     try std.testing.expectError(error.ManifestCorrupt, Engine.init(io, alloc, tmp_dir.dir));
+}
+
+test "HMAC: WAL roundtrip with key" {
+    // SEC-02, SEC-EXT-0401, GAP-0027: opt-in HMAC-SHA256 envelopes on WAL
+    // and manifest. Same key roundtrips cleanly; wrong key must fail loud
+    // with error.HmacMismatch rather than silently falling through.
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    const key = "test-hmac-key-32-bytes-padding!!";
+    {
+        var eng = try Engine.initWithConfig(io, alloc, tmp_dir.dir, .{ .hmac_key = key });
+        defer eng.deinit();
+        const t = TermPosting{ .term = "secret", .positions = &[_]u32{1} };
+        try eng.indexDocument(1, &[_]TermPosting{t});
+        try eng.flush();
+    }
+
+    // Reopen with same key — succeeds.
+    {
+        var eng = try Engine.initWithConfig(io, alloc, tmp_dir.dir, .{ .hmac_key = key });
+        defer eng.deinit();
+        try std.testing.expectEqual(@as(usize, 1), eng.segments.items.len);
+    }
+
+    // Reopen with WRONG key — must fail loud.
+    {
+        const result = Engine.initWithConfig(
+            io,
+            alloc,
+            tmp_dir.dir,
+            .{ .hmac_key = "different-key-32-bytes-padding!!" },
+        );
+        try std.testing.expectError(error.HmacMismatch, result);
+    }
 }
 
 test "WAL replay drops uncommitted (no COMMIT) records" {

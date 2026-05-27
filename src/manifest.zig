@@ -36,14 +36,29 @@ pub const Manifest = struct {
     }
 
     pub fn serialize(self: *const @This(), allocator: Allocator) ![]u8 {
+        return self.serializeWithHmac(allocator, null);
+    }
+
+    /// Serialize manifest bytes with an optional trailing HMAC-SHA256 tag
+    /// (SEC-02, SEC-EXT-0401, GAP-0027). When `hmac_key` is null the output
+    /// is byte-for-byte identical to the pre-WRK-037 format. When non-null
+    /// a 32-byte HMAC over the entire CRC-suffixed payload is appended.
+    pub fn serializeWithHmac(
+        self: *const @This(),
+        allocator: Allocator,
+        hmac_key: ?[]const u8,
+    ) ![]u8 {
         // v2 layout (QUAL-0014):
         //   magic(8) + version(4) + counter(8) + lsn(8) + total_docs(8)
         // + avg_doc_len(4) + segment_count(4)
         // + segments(40 * count: id(8)+doc_count(8)+tombstone_count(8)
         //                       +created_lsn(8)+level(1)+_reserved(7))
         // + crc(4)
+        // + optional hmac_sha256(32) (only when hmac_key != null)
         const header_size = 8 + 4 + 8 + 8 + 8 + 4 + 4;
-        const total_size = header_size + (self.segments.items.len * 40) + 4;
+        const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
+        const hmac_size: usize = if (hmac_key != null) Hmac.mac_length else 0;
+        const total_size = header_size + (self.segments.items.len * 40) + 4 + hmac_size;
         const buf = try allocator.alloc(u8, total_size);
         errdefer allocator.free(buf);
         var pos: usize = 0;
@@ -70,17 +85,45 @@ pub const Manifest = struct {
 
         const crc = utils.hashCrc32c(buf[0..pos]);
         utils.writeU32Le(buf, &pos, crc);
+
+        if (hmac_key) |key| {
+            var tag: [Hmac.mac_length]u8 = undefined;
+            Hmac.create(&tag, buf[0..pos], key);
+            @memcpy(buf[pos .. pos + Hmac.mac_length], &tag);
+        }
+
         return buf;
     }
 
     pub fn deserialize(allocator: Allocator, data: []const u8) !Manifest {
-        const min_size = 8 + 4 + 8 + 8 + 8 + 4 + 4 + 4;
+        return deserializeWithHmac(allocator, data, null);
+    }
+
+    pub fn deserializeWithHmac(
+        allocator: Allocator,
+        data: []const u8,
+        hmac_key: ?[]const u8,
+    ) !Manifest {
+        const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
+        const hmac_trailer: usize = if (hmac_key != null) Hmac.mac_length else 0;
+        const min_size = 8 + 4 + 8 + 8 + 8 + 4 + 4 + 4 + hmac_trailer;
         if (data.len < min_size) return error.InvalidData;
         if (data.len > limits.MAX_MANIFEST_BYTES) return error.ManifestTooLarge;
         if (!std.mem.eql(u8, data[0..8], &MANIFEST_MAGIC)) return error.InvalidMagic;
 
-        const stored_crc = utils.readU32LeAt(data, data.len - 4);
-        const computed_crc = utils.hashCrc32c(data[0 .. data.len - 4]);
+        // If an HMAC key is configured, the trailing 32 bytes are the tag.
+        // Strip them off before CRC verification so the CRC continues to be
+        // computed over its original byte range (SEC-02, SEC-EXT-0401).
+        const core_end = data.len - hmac_trailer;
+
+        if (hmac_key) |key| {
+            var computed_tag: [Hmac.mac_length]u8 = undefined;
+            Hmac.create(&computed_tag, data[0..core_end], key);
+            if (!std.mem.eql(u8, data[core_end..], &computed_tag)) return error.HmacMismatch;
+        }
+
+        const stored_crc = utils.readU32LeAt(data, core_end - 4);
+        const computed_crc = utils.hashCrc32c(data[0 .. core_end - 4]);
         if (stored_crc != computed_crc) return error.ChecksumMismatch;
 
         var pos: usize = 8;
@@ -128,7 +171,18 @@ pub const Manifest = struct {
     }
 
     pub fn writeToFile(self: *const @This(), io: std.Io, dir: std.Io.Dir, path: []const u8, allocator: Allocator) !void {
-        const data = try self.serialize(allocator);
+        return self.writeToFileWithHmac(io, dir, path, allocator, null);
+    }
+
+    pub fn writeToFileWithHmac(
+        self: *const @This(),
+        io: std.Io,
+        dir: std.Io.Dir,
+        path: []const u8,
+        allocator: Allocator,
+        hmac_key: ?[]const u8,
+    ) !void {
+        const data = try self.serializeWithHmac(allocator, hmac_key);
         defer allocator.free(data);
         try utils.atomicWrite(io, dir, path, data);
     }
