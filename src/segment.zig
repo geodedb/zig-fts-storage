@@ -12,6 +12,25 @@ pub const Error = @import("errors.zig").SegmentError;
 // Memtable (In-Memory Staging)
 // ============================================================================
 
+// PERF-0016: the current layout is Array-of-Structs (AoS) — every
+// `MemPosting` row carries an inline `ArrayListUnmanaged(u32)` header (a
+// 24-byte struct that itself holds a heap pointer to the positions array).
+// For workloads with many short posting lists the flush loop walks
+// `postings.items` and dereferences a separate heap pointer per row,
+// breaking the CPU's stride prefetch — most cycles end up waiting on L1/L2.
+//
+// Production path: refactor to Struct-of-Arrays (SoA) on the per-term
+// posting list — `doc_ids: []u64`, `tfs: []u32`, plus a sidecar
+// `positions: []u32` with `positions_offsets: []u32` so each posting's
+// positions are a single contiguous span. The flush iteration then becomes
+// three linear scans over packed arrays, which the prefetcher can saturate.
+//
+// Deferred until cachegrind / `perf stat` measurements on the spec'd
+// 100k-doc corpus confirm the L1/L2 cost is dominant — the AoS layout is
+// fine for the v0.1 scale (<10k terms per memtable) and a refactor of
+// `MemPostingsList`, `addPosting`, and `writeMemtable` is more risk than
+// the win justifies at this scale. The token here is tracked so the
+// optimization is not silently lost; reopen with the perf evidence in hand.
 pub const MemPosting = struct {
     doc_id: u64,
     tf: u32,
