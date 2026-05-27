@@ -355,14 +355,39 @@ pub const Engine = struct {
 
         const next_segment_id = self.current_manifest.counter + 1;
 
+        // PHASES 1 and 2 are guarded by errdefers so a partial failure
+        // (segment on disk but no manifest referencing it, or in-memory
+        // manifest mutated but not durably persisted) is rolled back.
+        // PHASE 3 runs after `phase2_done = true`, by which point the
+        // manifest is durable and the segment is officially live — so the
+        // unwinding errdefers must check the flag before firing (QUAL-0005).
+        var phase2_done: bool = false;
+
+        // Snapshot pre-flush manifest state so we can restore on failure.
+        const old_total_docs = self.current_manifest.total_docs;
+        const old_counter = self.current_manifest.counter;
+        const old_last_checkpoint_lsn = self.current_manifest.last_checkpoint_lsn;
+
+        // PHASE 1: write the segment to disk. Until the manifest pointing at
+        // this segment is durable the segment is provisional — if anything
+        // after this point fails we must remove it so it does not become an
+        // orphan referenced by no manifest.
+        //
+        // Pre-format the segment directory name so the errdefer below cannot
+        // itself fail — defer expressions cannot contain `return`/`try`.
+        var seg_name_buf: [32]u8 = undefined;
+        const seg_name = std.fmt.bufPrint(&seg_name_buf, "seg_{d}", .{next_segment_id}) catch unreachable;
+
         var writer = segment.SegmentWriter{
             .io = self.io,
             .dir = self.seg_dir,
             .allocator = self.allocator,
             .segment_id = next_segment_id,
         };
-
         try writer.writeMemtable(&self.memtable);
+        errdefer if (!phase2_done) {
+            self.seg_dir.deleteTree(self.io, seg_name) catch {};
+        };
 
         // Add to manifest. created_lsn carries the last txn that contributed
         // to this segment so downstream consumers can order segments by
@@ -376,6 +401,9 @@ pub const Engine = struct {
             .created_lsn = self.next_txn_id - 1,
             .level = 0,
         });
+        errdefer if (!phase2_done) {
+            _ = self.current_manifest.segments.pop();
+        };
 
         // Plumb running totals up to the manifest (QUAL-0006, DC-2, DC-3,
         // GAP-0007). avg_doc_len is intentionally left at zero here; the
@@ -383,15 +411,28 @@ pub const Engine = struct {
         // normalization) which needs per-doc length tracking the memtable
         // does not yet capture.
         self.current_manifest.total_docs += self.memtable.total_docs;
-
         self.current_manifest.counter += 1;
         self.current_manifest.last_checkpoint_lsn = self.next_txn_id - 1;
+        errdefer if (!phase2_done) {
+            self.current_manifest.total_docs = old_total_docs;
+            self.current_manifest.counter = old_counter;
+            self.current_manifest.last_checkpoint_lsn = old_last_checkpoint_lsn;
+        };
 
-        // Atomic write Manifest
+        // PHASE 2: durably write the manifest. After this returns successfully
+        // the segment is officially live and the errdefers above must NOT fire
+        // for any subsequent failure.
         const man_file = if (self.current_manifest.counter % 2 == 0) "manifest.a" else "manifest.b";
         try self.current_manifest.writeToFile(self.io, self.dir, man_file, self.allocator);
+        phase2_done = true;
 
-        // Truncate WAL
+        // PHASE 3: best-effort cleanup of staging state. WAL truncation and
+        // SegmentReader open can still fail (e.g. ENOSPC, EMFILE) but the
+        // durable storage is consistent — the in-memory layer just becomes
+        // temporarily stale and the next operation will hit the same error.
+        //
+        // Truncate WAL. The records it contained are now redundant with the
+        // segment + manifest pair.
         self.wal_file.close(self.io);
         self.wal_file = try self.wal_dir.createFile(self.io, "fts.wal", .{
             .truncate = true,
@@ -399,11 +440,11 @@ pub const Engine = struct {
         });
         self.wal_writer = try wal.WalWriter.init(self.io, self.wal_file, self.allocator);
 
-        // Open SegmentReader and add to segments list
+        // Open SegmentReader and add to segments list.
         const seg_reader = try segment.SegmentReader.init(self.io, self.allocator, self.seg_dir, next_segment_id);
         try self.segments.append(self.allocator, seg_reader);
 
-        // Clear memtable
+        // Clear memtable.
         self.memtable.deinit();
         self.memtable = segment.Memtable.init(self.allocator);
     }
