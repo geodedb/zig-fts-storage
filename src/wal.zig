@@ -4,6 +4,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const utils = @import("utils.zig");
+const limits = @import("limits.zig");
 
 pub const Error = @import("errors.zig").WalError;
 
@@ -14,6 +15,15 @@ pub const WalRecordType = enum(u8) {
     commit = 2,
     index_doc = 3,
     delete_doc = 4,
+
+    /// Validate-and-convert a raw byte to a WalRecordType. Centralises the
+    /// "1..=4" check so both `WalRecord.deserialize` (in-memory buffer) and
+    /// `WalReader.next` (streaming file) share one source of truth
+    /// (QUAL-0024).
+    pub fn fromByte(b: u8) error{InvalidData}!WalRecordType {
+        if (b < 1 or b > 4) return error.InvalidData;
+        return @as(WalRecordType, @enumFromInt(b));
+    }
 };
 
 pub const WalRecord = struct {
@@ -70,9 +80,7 @@ pub const WalRecord = struct {
         if (data.len < 1 + 8 + 8 + 4 + 4) return error.Incomplete;
 
         var pos: usize = 0;
-        const record_type_val = data[0];
-        if (record_type_val < 1 or record_type_val > 4) return error.InvalidData;
-        const record_type = @as(WalRecordType, @enumFromInt(record_type_val));
+        const record_type = try WalRecordType.fromByte(data[0]);
         pos += 1;
 
         const txn_id = utils.readU64Le(data, &pos);
@@ -169,6 +177,17 @@ pub const WalWriter = struct {
     pub fn sync(self: *WalWriter) !void {
         try self.file.sync(self.io);
     }
+
+    /// Append a record and immediately fsync the WAL. The Engine always pairs
+    /// `append` with `sync` for durability (`engine.zig` indexDocument /
+    /// deleteDocument), so this helper makes the pairing atomic at the API
+    /// level — callers cannot accidentally forget the sync (QUAL-0032).
+    /// `append` + `sync` remain public so tests can exercise the pre-sync
+    /// state and so a future group-commit path can fan out manually.
+    pub fn appendAndSync(self: *WalWriter, record: WalRecord) !void {
+        try self.append(record);
+        try self.sync();
+    }
 };
 
 pub const WalReader = struct {
@@ -214,16 +233,14 @@ pub const WalReader = struct {
         if (read_header < header_buf.len) return error.Incomplete;
 
         var pos: usize = 0;
-        const record_type_val = header_buf[0];
-        if (record_type_val < 1 or record_type_val > 4) return error.InvalidData;
-        const record_type = @as(WalRecordType, @enumFromInt(record_type_val));
+        const record_type = try WalRecordType.fromByte(header_buf[0]);
         pos += 1;
 
         const txn_id = utils.readU64Le(&header_buf, &pos);
         const doc_id = utils.readU64Le(&header_buf, &pos);
         const payload_len = utils.readU32Le(&header_buf, &pos);
 
-        if (payload_len > 10 * 1024 * 1024) return error.InvalidData;
+        if (payload_len > limits.MAX_WAL_PAYLOAD_BYTES) return error.InvalidData;
 
         const payload_and_crc = try self.allocator.alloc(u8, payload_len + 4);
         defer self.allocator.free(payload_and_crc);

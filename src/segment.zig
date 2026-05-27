@@ -34,8 +34,10 @@ pub const Error = @import("errors.zig").SegmentError;
 pub const MemPosting = struct {
     doc_id: u64,
     tf: u32,
-    // For simplicity, we just store positions as a slice.
-    // In a real implementation this would be an unmanaged array list.
+    /// Per-posting position list. ArrayListUnmanaged is chosen so the
+    /// per-posting growth cost is amortized — the alternative (a fresh
+    /// allocator.dupe on every position update) would dominate ingest
+    /// (see PERF-0003 / the SoA refactor note above).
     positions: std.ArrayListUnmanaged(u32),
 };
 
