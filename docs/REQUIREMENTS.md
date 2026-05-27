@@ -85,3 +85,16 @@
 - **Not Implemented** — No source-level evidence of the requirement.
 - **Unknown — verification pending** — Requirement text unclear; needs spec disambiguation before status can be assigned.
 - **Reserved** — Slot held for future requirements; no acceptance criteria yet.
+
+## Requirements pending re-collection
+
+The following requirements were enumerated in the original gap-collector
+audit but their full text was not captured. Re-run gap-collector or consult
+the source documents to recover them, then update this file.
+
+- REQ-0033 — [pending re-collection from source docs]
+- REQ-0036 — [pending re-collection from source docs]
+
+Status: Open — re-collection deferred. Tracked in `docs/GAP_ANALYSIS.md`
+under GAP-0021 and GAP-0022, both currently marked
+Won't-Do (Until Re-Collection).

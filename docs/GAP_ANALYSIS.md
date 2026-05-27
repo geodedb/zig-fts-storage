@@ -291,11 +291,12 @@
 - **Effort:** S
 - **Evidence:**
   - `docs/fts-storage-spec.md` — REQ-0033 referenced without clear definition or acceptance criteria
+  - `docs/REQUIREMENTS.md` — REQ-0033 row currently a placeholder pending re-collection
 - **Acceptance criteria:**
   - REQ-0033 disambiguated in spec
   - Mapped to either implementation, gap, or dropped
 - **Suggested labels:** `gap`, `priority::medium`, `type::docs`, `area::docs`
-- **Status:** Open — Deferred to subsequent /gap:close run
+- **Status:** Won't-Do (Until Re-Collection) — requirement text was not captured in the original gap-collector audit; re-collecting from upstream source docs is a prerequisite. Tracked via the "Requirements pending re-collection" section in `docs/REQUIREMENTS.md`.
 
 ### GAP-0022: REQ-0036 source / behavior unknown
 
@@ -305,11 +306,12 @@
 - **Effort:** S
 - **Evidence:**
   - `docs/fts-storage-spec.md` — REQ-0036 referenced without clear definition or acceptance criteria
+  - `docs/REQUIREMENTS.md` — REQ-0036 row currently a placeholder pending re-collection
 - **Acceptance criteria:**
   - REQ-0036 disambiguated in spec
   - Mapped to either implementation, gap, or dropped
 - **Suggested labels:** `gap`, `priority::medium`, `type::docs`, `area::docs`
-- **Status:** Open — Deferred to subsequent /gap:close run
+- **Status:** Won't-Do (Until Re-Collection) — requirement text was not captured in the original gap-collector audit; re-collecting from upstream source docs is a prerequisite. Tracked via the "Requirements pending re-collection" section in `docs/REQUIREMENTS.md`.
 
 ### GAP-0025: Spec governance process undefined
 
