@@ -48,7 +48,7 @@ Sorted by `PriorityScore` descending. All file:line citations point at `/home/be
 | 2 | QUAL-0002 | `docs/fts-storage-spec.md` is a Geode LLM dump with `citeturn*` artifacts | docs | Critical | 80 | `docs/fts-storage-spec.md:*` | Open — Deferred to subsequent /gap:close run | — |
 | 3 | QUAL-0006 | `Memtable.total_docs` and `SegmentEntry.doc_count` never incremented — BM25 wrong | api-contract | High | 70 | `src/engine.zig` (indexDocument), `src/segment.zig` | **Closed** | commit 2934b17 |
 | 4 | QUAL-0004 | `loadManifest` silently swallows `ChecksumMismatch` via `catch null` | api-contract | High | 70 | `src/manifest.zig` (loadManifest) | **Closed** | commit d3eae2b |
-| 5 | QUAL-0005 | Flush ordering can orphan segments / truncate WAL on partial failure | architecture | High | 56 | `src/engine.zig` (flush path) | Open — Deferred to subsequent /gap:close run | — |
+| 5 | QUAL-0005 | Flush ordering can orphan segments / truncate WAL on partial failure | architecture | High | 56 | `src/engine.zig` (flush path) | **Closed** | commit 60d5c26 |
 | 6 | QUAL-0011 | Integration + stress tests exercise stub `lib.init`, not `Engine` | tests | High | 56 | `tests/*`, `src/root.zig` | **Closed** | commit 2d51283 |
 | 7 | QUAL-0003 | README / `root.zig` Feature 1/2/3 placeholder text | docs | High | 49 | `README.md`, `src/root.zig` | **Closed** | commit 3c47bc5 |
 | 8 | QUAL-0008 | `Engine.deinit` doesn't close `self.dir` — ownership unclear | api-contract | High | 49 | `src/engine.zig` (deinit) | **Closed** | commit 14c4fe6 |
@@ -58,8 +58,8 @@ Sorted by `PriorityScore` descending. All file:line citations point at `/home/be
 | 12 | QUAL-0018 | `indexDocument`: memtable updated before WAL append — divergence on WAL failure | architecture | Medium | 32 | `src/engine.zig` (indexDocument) | **Closed** | commit 5bd07c1 |
 | 13 | QUAL-0015 | `varint` accepts `u64` but callers `@intCast` down — silent truncation in ReleaseFast | api-contract | Medium | 32 | `src/utils.zig` (varint), call sites in `wal.zig`, `segment.zig` | Open — Deferred to subsequent /gap:close run | — |
 | 14 | QUAL-0016 | `SegmentReader.search` reopens dir + file each query — correctness + perf | perf | Medium | 32 | `src/segment.zig` (SegmentReader.search) | Open — Deferred to subsequent /gap:close run | — |
-| 15 | QUAL-0020 | No varint / CRC / torn-WAL fuzz tests in any CI matrix mode | tests | Medium | 27 | CI workflow + `tests/` | Open — Deferred to subsequent /gap:close run | — |
-| 16 | QUAL-0021 | No FD-count or post-flush dir-state assertions in tests | tests | Medium | 27 | `tests/*` | Open — Deferred to subsequent /gap:close run | — |
+| 15 | QUAL-0020 | No varint / CRC / torn-WAL fuzz tests in any CI matrix mode | tests | Medium | 27 | CI workflow + `tests/` | **Closed** | commit 9e6fd81 |
+| 16 | QUAL-0021 | No FD-count or post-flush dir-state assertions in tests | tests | Medium | 27 | `tests/*` | **Closed** | commit 9e6fd81 |
 | 17 | QUAL-0012 | CRC hashing pattern divergence across modules | maintainability | Medium | 20 | `src/wal.zig`, `src/manifest.zig`, `src/segment.zig` | **Closed** | commit ac16729 |
 | 18 | QUAL-0019 | `WalWriter.init` swallows stat error via `\|_\| 0` | api-contract | Medium | 20 | `src/wal.zig` (WalWriter.init) | **Closed** | commit 9963e3d |
 | 19 | QUAL-0014 | `SegmentEntry` missing ordering metadata for future merge | architecture | Medium | 20 | `src/manifest.zig` (SegmentEntry) | **Closed** | commit 1caa300 |
@@ -90,6 +90,9 @@ Sorted by `PriorityScore` descending. All file:line citations point at `/home/be
 | Finding ID(s) | Title | Commit | Notes |
 |---|---|---|---|
 | QUAL-0001 | `root.zig` exposes no real public API | 7234563 | Engine, EngineOptions, error sets re-exported; template stub deleted |
+| QUAL-0005 | Flush ordering can orphan segments / truncate WAL on partial failure | 60d5c26 | Flush now writes segment + fsyncs parent, then atomically swaps manifest, then truncates WAL |
+| QUAL-0020 | No varint / CRC / torn-WAL fuzz tests | 9e6fd81 | Fault-injection harness added; varint/CRC/torn-WAL recovery fuzz targets wired into CI |
+| QUAL-0021 | No FD-count or post-flush dir-state assertions | 9e6fd81 | Post-flush FD count and directory-state assertions added to integration test suite |
 | QUAL-0003 | README / `root.zig` Feature 1/2/3 placeholder text | 3c47bc5 | Replaced with concrete capability list |
 | QUAL-0004 | `loadManifest` silently swallows `ChecksumMismatch` | d3eae2b | Typed `error.ManifestCorrupt` surfaced; tampered-manifest test added |
 | QUAL-0006 | `Memtable.total_docs` / `SegmentEntry.doc_count` never incremented | 2934b17 | Counters incremented per `indexDocument`; asserted > 0 at flush |
@@ -117,15 +120,15 @@ Sorted by `PriorityScore` descending. All file:line citations point at `/home/be
 ## Top 10 by PriorityScore (post-closure)
 
 1. **QUAL-0002** — `docs/fts-storage-spec.md` LLM artifacts. (Critical, score 80) — Open
-2. **QUAL-0005** — Flush ordering orphans segments on partial failure. (High, score 56) — Open
-3. **QUAL-0015** — `varint` silent `@intCast` truncation in ReleaseFast. (Medium, score 32) — Open
-4. **QUAL-0016** — `SegmentReader.search` reopens dir+file each query. (Medium, score 32) — Open
-5. **QUAL-0020** — No varint/CRC/torn-WAL fuzz tests. (Medium, score 27) — Open
-6. **QUAL-0021** — No FD-count / post-flush dir assertions. (Medium, score 27) — Open
-7. **QUAL-0032** — `WalWriter.append` + sync not coalesced. (Medium, score 13) — Open
-8. **QUAL-0025** — 177-line `build()` function. (Medium, score 10) — Open
-9. **QUAL-0027** — `rss_bytes_peak` emitted on non-Linux. (Medium, score 10) — Open
-10. **DO-4** — CI `zig-format` excludes `benchmarks/` and `build.zig`. (Low, score 7) — Open
+2. **QUAL-0015** — `varint` silent `@intCast` truncation in ReleaseFast. (Medium, score 32) — Open
+3. **QUAL-0016** — `SegmentReader.search` reopens dir+file each query. (Medium, score 32) — Open
+4. **QUAL-0032** — `WalWriter.append` + sync not coalesced. (Medium, score 13) — Open
+5. **QUAL-0025** — 177-line `build()` function. (Medium, score 10) — Open
+6. **QUAL-0027** — `rss_bytes_peak` emitted on non-Linux. (Medium, score 10) — Open
+7. **DO-4** — CI `zig-format` excludes `benchmarks/` and `build.zig`. (Low, score 7) — Open
+8. **QUAL-0022** — Stale comment in `MemPosting`. (Low, score 4) — Open
+9. **QUAL-0024** — Record-type validation duplicated. (Low, score 4) — Open
+10. **QUAL-0026** — `-Dtsan` / `-Dno-cli` help text inaccuracies. (Low, score 4) — Open
 
 ---
 
@@ -134,7 +137,7 @@ Sorted by `PriorityScore` descending. All file:line citations point at `/home/be
 1. **No public API (resolved).** QUAL-0001 and QUAL-0034 closed in commit 7234563 / c4240a1. `Engine` is now properly re-exported and the CLI drives the real engine.
 2. **Silent error swallowing (mostly resolved).** QUAL-0004 (manifest checksum), QUAL-0019 (WAL stat error) closed. QUAL-0015 (`@intCast` truncation) remains open — see also SEC-EXT-0102/0103 in SECURITY_GAP_ANALYSIS.
 3. **Documented-but-not-implemented schema (resolved).** QUAL-0013/DC-1 (`WalRecordType.begin/commit`), DC-2/DC-3 (`Manifest` dead fields), and QUAL-0006 (`Memtable.total_docs`) all closed.
-4. **Tests test the easy thing (partially resolved).** QUAL-0011 (tests now bind to `Engine`) closed in 2d51283. QUAL-0020 (fuzz targets) and QUAL-0021 (FD/dir assertions) remain open.
+4. **Tests test the easy thing (largely resolved).** QUAL-0011 (tests now bind to `Engine`) closed in 2d51283. QUAL-0020 (fuzz targets) and QUAL-0021 (FD/dir assertions) closed in 9e6fd81.
 5. **Scaffolding outweighs library (largely resolved).** QUAL-0003, QUAL-0031/DC-5, DO-2/DO-3, QUAL-0034 all closed. QUAL-0029 (CHANGELOG date) and QUAL-0030 (SECURITY.md contacts) deferred.
 
 ---
@@ -152,10 +155,7 @@ Sorted by `PriorityScore` descending. All file:line citations point at `/home/be
 
 ### Medium (1–5 days)
 
-- Fix flush ordering: segment + parent fsync, atomic manifest swap, then WAL truncate (QUAL-0005).
 - Cache `SegmentReader` file handles across queries (QUAL-0016).
-- Add fuzz harnesses for varint / CRC / torn-WAL recovery and wire into CI (QUAL-0020).
-- Add FD-count + post-flush directory-state assertions (QUAL-0021).
 - Add group-commit / batched-sync path to WAL (QUAL-0032).
 
 ### Strategic (> 5 days)
@@ -168,6 +168,6 @@ Sorted by `PriorityScore` descending. All file:line citations point at `/home/be
 
 ## Status
 
-**18 of 38 findings closed in the 2026-05-26 closure run. 20 findings remain open.**
+**21 of 38 findings closed across closure runs (2026-05-26). 17 findings remain open.**
 
 No GitLab issues were created, updated, or closed by this run. This document is the sole artifact.

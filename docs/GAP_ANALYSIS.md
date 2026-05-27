@@ -3,30 +3,31 @@
 - **Project:** devnw/zig/fts-storage
 - **Run date:** 2026-05-26
 - **Mode:** docs-only (no GitLab issues created/updated/closed)
-- **Open gaps:** 21
-- **Resolved gaps:** 7 (see GAP_ANALYSIS_RESOLVED.md)
+- **Open gaps (current):** 7
+- **Closed gaps (current file):** 21 (14 this run + 7 previously in GAP_ANALYSIS_RESOLVED.md)
+- **Won't-Do:** 0 (see SECURITY_GAP_ANALYSIS.md for SEC-08/SEC-EXT-0503/0505/0506)
 
-## Severity Histogram
+## Severity Histogram (remaining open)
 
 | Severity | Count |
 |----------|-------|
-| Critical | 4 |
-| High | 8 |
-| Medium | 7 |
+| Critical | 0 |
+| High | 0 |
+| Medium | 5 |
 | Low | 2 |
-| **Total** | **21** |
+| **Total** | **7** |
 
-## Category Histogram
+## Category Histogram (remaining open)
 
 | Category | Count |
 |----------|-------|
-| Functional | 9 |
-| Non-functional | 2 |
-| Testing | 4 |
-| Security | 4 |
+| Functional | 2 |
+| Non-functional | 0 |
+| Testing | 2 |
+| Security | 0 |
 | Performance | 0 |
-| Docs | 1 |
-| Tooling | 1 |
+| Docs | 2 |
+| Tooling | 0 |
 | Governance | 1 |
 
 ---
@@ -47,7 +48,7 @@
   - Positional postings consumed to verify adjacency
   - Unit + integration tests cover multi-term phrases and slop=0
 - **Suggested labels:** `gap`, `priority::high`, `type::feature`, `area::query`
-- **Status:** Open — Deferred to subsequent /gap:close run
+- **Status:** Closed — commit e919a46 (WRK-036)
 
 ### GAP-0002: Highlight/snippet generation missing
 
@@ -78,7 +79,7 @@
   - Background thread/task performs compaction without blocking writes
   - Tombstones eliminated on merge; tests verify segment count bounds
 - **Suggested labels:** `gap`, `priority::high`, `type::feature`, `area::storage`
-- **Status:** Open — Deferred to subsequent /gap:close run
+- **Status:** Closed — commit 80256b6 (WRK-041)
 
 ### GAP-0004: Legacy migration path absent
 
@@ -109,7 +110,7 @@
   - Per-query normalization by avg_doc_len
   - Unit tests cover known BM25 reference vectors
 - **Suggested labels:** `gap`, `priority::high`, `type::feature`, `area::query`
-- **Status:** Open — Deferred to subsequent /gap:close run
+- **Status:** Closed — commit ebec3e4 (WRK-035)
 
 ### GAP-0006: norms.bin not written or consumed
 
@@ -125,7 +126,7 @@
   - BM25 scorer reads `norms.bin` during query
   - Round-trip test: load segment and verify norm equals 1/sqrt(len)
 - **Suggested labels:** `gap`, `priority::high`, `type::feature`, `area::storage`
-- **Status:** Open — Deferred to subsequent /gap:close run
+- **Status:** Closed — commit ebec3e4 (WRK-035)
 
 ### GAP-0008: Benchmark scenarios incomplete
 
@@ -140,7 +141,7 @@
   - Stable JSON output schema per the native-benchmarks contract
   - Baseline numbers checked into `docs/performance/`
 - **Suggested labels:** `gap`, `priority::high`, `type::performance`, `area::benchmarks`
-- **Status:** Partial — scenarios driven by Engine in c4240a1; baseline.json still pending
+- **Status:** Closed — commit f14196b (WRK-024) completed bench scenarios and baseline.json; partially staged in c4240a1
 
 ### GAP-0009: AES-256-GCM at rest not implemented
 
@@ -156,7 +157,7 @@
   - Per-segment nonce; key supplied at engine init
   - Tamper-detection test: bit flip causes decrypt failure
 - **Suggested labels:** `gap`, `priority::critical`, `type::security`, `area::storage`
-- **Status:** Open — Deferred to subsequent /gap:close run
+- **Status:** Closed — commit 41b1d89 (WRK-038)
 
 ### GAP-0010: FLE (field-level encryption) exclusion enforcement absent
 
@@ -172,7 +173,7 @@
   - Unit test: indexing a doc with excluded field produces zero postings for that field
   - Audit log entry on attempted indexing of excluded field
 - **Suggested labels:** `gap`, `priority::critical`, `type::security`, `area::query`
-- **Status:** Open — Deferred to subsequent /gap:close run
+- **Status:** Closed — commit 1197efc (WRK-040)
 
 ### GAP-0011: RLS / ABAC enforcement not implemented
 
@@ -188,7 +189,7 @@
   - Post-filter applied prior to result return
   - Tests cover deny-by-default and ABAC predicate evaluation
 - **Suggested labels:** `gap`, `priority::critical`, `type::security`, `area::query`
-- **Status:** Open — Deferred to subsequent /gap:close run
+- **Status:** Closed — commit 871eed2 (WRK-039)
 
 ### GAP-0012: WAL begin/commit framing missing
 
@@ -204,7 +205,7 @@
   - Replay skips records in aborted transactions
   - Crash test: kill mid-txn → replay yields pre-txn state
 - **Suggested labels:** `gap`, `priority::high`, `type::feature`, `area::storage`
-- **Status:** Open — Deferred to subsequent /gap:close run
+- **Status:** Closed — commit 15288be (WRK-025)
 
 ### GAP-0013: Aborted transactions replayed
 
@@ -220,7 +221,7 @@
   - Atomicity test: abort yields no visible writes after restart
   - Property test over random commit/abort sequences
 - **Suggested labels:** `gap`, `priority::critical`, `type::bug`, `area::storage`
-- **Status:** Open — Deferred to subsequent /gap:close run
+- **Status:** Closed — commit 15288be (WRK-025)
 
 ### GAP-0016: Fault-injection harness absent
 
@@ -235,7 +236,7 @@
   - Recovery tests pass under each fault class
   - CI runs fault-injection profile on every PR
 - **Suggested labels:** `gap`, `priority::high`, `type::test`, `area::testing`
-- **Status:** Open — Deferred to subsequent /gap:close run
+- **Status:** Closed — commit 9e6fd81 (WRK-022)
 
 ### GAP-0017: Multi-graph isolation not enforced
 
@@ -280,7 +281,7 @@
   - Regression beyond threshold fails the pipeline
   - Override mechanism documented for parser-changing PRs
 - **Suggested labels:** `gap`, `priority::medium`, `type::ci`, `area::benchmarks`
-- **Status:** Open — Deferred to subsequent /gap:close run
+- **Status:** Closed — commit f14196b (WRK-024); baseline.json committed; CI gate enabled
 
 ### GAP-0021: REQ-0033 source / behavior unknown
 
@@ -336,7 +337,7 @@
   - Policy describes when/how baselines are refreshed
   - Rebaseline requires signed-off ADR-style note
 - **Suggested labels:** `gap`, `priority::medium`, `type::docs`, `area::benchmarks`
-- **Status:** Open — Deferred to subsequent /gap:close run
+- **Status:** Closed — commit f14196b (WRK-024); baseline policy committed alongside baseline.json
 
 ### GAP-0027: WAL not protected by AEAD
 
@@ -351,7 +352,7 @@
   - Tamper test: flipping a byte aborts replay
   - Replay performance regression < threshold documented in bench
 - **Suggested labels:** `gap`, `priority::high`, `type::security`, `area::storage`
-- **Status:** Open — Deferred to subsequent /gap:close run
+- **Status:** Closed — commit 439dad4 (WRK-037); also SEC-EXT-0401, SEC-EXT-0403 closed same commit
 
 ### GAP-0028: Manifest A/B tampering test missing
 
@@ -365,4 +366,4 @@
   - Test corrupts manifest A and verifies engine selects valid B
   - Test corrupts both and verifies engine refuses to open
 - **Suggested labels:** `gap`, `priority::medium`, `type::test`, `area::testing`
-- **Status:** Open — Deferred to subsequent /gap:close run
+- **Status:** Closed — commit 657562a (WRK-028) + commit fc1b652 (WRK-023)

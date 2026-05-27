@@ -5,7 +5,7 @@
 - Mode: **docs-only** (Phase 4 tracker; no GitLab issues created, updated, or closed)
 - Source phases: Phase 2 scanner IDs (`RF-*`, `BC-*`, `ZG-*`) + Phase 3 reviewer IDs (`PERF-0001..0030`)
 - Doc location: `docs/PERF_GAP_ANALYSIS.md`
-- **Closure run:** 2026-05-26 — 2 findings closed (PERF-0013, PERF-0028); 27 remain open
+- **Closure run:** 2026-05-26 — 13 findings closed, 2 partial (PERF-0001, PERF-0002); 16 remain open
 
 > Default status (all unmodified rows): **Open — Issue not created (docs-only run)**.
 
@@ -44,11 +44,11 @@ P0 items measured during invalid benches (e.g. PERF-0020/PERF-0025) intentionall
 
 | Rank | ID(s) | Title | PerfScore | Why it's the headline |
 |------|-------|-------|-----------|----------------------|
-| 1 | **PERF-0020** / ZG-04 | Bench scenarios call `lib.init` stub — entire suite is DCE'd no-ops | **100** | Validates that no current bench number is meaningful; blocks all other perf claims. |
-| 2 | **PERF-0025** / ZG-05 | `lib_module` not forced to ReleaseFast for bench — Debug code path measured | **100** | Even if scenarios were rewritten, the library code under measurement is Debug. |
-| 3 | **PERF-0001** / RF-01 | WAL fsync per record; no group commit → ingest throughput-cap | **80** | At ~10ms per disk fsync, sets a hard ceiling of ~100 docs/s/thread. |
-| 4 | **PERF-0004** / RF-04 | SegmentWriter unbuffered tiny writes (~5M syscalls per flush) | **64** | `writeStreamingAll` per varint; flush dominated by syscall overhead. |
-| 5 | **PERF-0006** / RF-06 | `TermIterator.isDeleted` O(segments) per match — no engine-aggregated tombstone set | **64** | Every match scans all 16+ segment tombstone tables; query perf collapses with segment count. |
+| 1 | **PERF-0020** / ZG-04 | Bench scenarios call `lib.init` stub — entire suite is DCE'd no-ops | **100** | Validates that no current bench number is meaningful; blocks all other perf claims. **Closed — commit f14196b** |
+| 2 | **PERF-0025** / ZG-05 | `lib_module` not forced to ReleaseFast for bench — Debug code path measured | **100** | Even if scenarios were rewritten, the library code under measurement is Debug. **Closed — commit f14196b** |
+| 3 | **PERF-0001** / RF-01 | WAL fsync per record; no group commit → ingest throughput-cap | **80** | At ~10ms per disk fsync, sets a hard ceiling of ~100 docs/s/thread. **Partial — WRK-032 (49872dd) eliminated per-record alloc churn; true group commit (N-record batch fsync) deferred** |
+| 4 | **PERF-0004** / RF-04 | SegmentWriter unbuffered tiny writes (~5M syscalls per flush) | **64** | `writeStreamingAll` per varint; flush dominated by syscall overhead. **Closed — commit caf5831** |
+| 5 | **PERF-0006** / RF-06 | `TermIterator.isDeleted` O(segments) per match — no engine-aggregated tombstone set | **64** | Every match scans all 16+ segment tombstone tables; query perf collapses with segment count. **Closed — commit ab17a07** |
 
 ---
 
@@ -73,20 +73,20 @@ P0 items measured during invalid benches (e.g. PERF-0020/PERF-0025) intentionall
 | 2 | PERF-0025 / ZG-05 | `lib_module` keeps default optimize (Debug) under bench exes | build | P0 | 100 | `build.zig:25, 32, 142, 211` (bench exes force ReleaseFast but reuse Debug `module`) | Build a second `lib_module_release` with `.optimize = .ReleaseFast` and pass that to `benchModule`; or fail-fast in bench main if `builtin.mode != .ReleaseFast`. | Confirm `builtin.mode == .ReleaseFast` from inside a bench scenario via `@import("builtin").mode`; assert at runtime; rerun and compare wall-time to old Debug numbers (expect 3–10× faster). |
 | 3 | PERF-0001 / RF-01 | WAL fsync per record; no group commit | io | P0 | 80 | `src/engine.zig:214–215, 230–231`; `src/wal.zig:98–100` | Add a `WalWriter.appendBatch` + group-commit channel; fsync once per N records or every D ms; expose `fsync_policy: { every, group(N,D) }`. | After harness fix, bench ingest with N=1 vs N=64 group commit; expect 10–50× throughput uplift on rotating disk / NVMe; verify durability via crash test that truncates last partial group. |
 | 4 | PERF-0009 / ZG-02 | Engine single-threaded but unsynchronized | concurrency | P0 | 64 | `src/engine.zig:13–27, 181–232` (no mutex around `next_txn_id`, `memtable`, `wal_writer`); `src/search.zig` (reader-side no guards) | Adopt a documented model: single-writer thread + RCU-style segment list for readers; or `std.Thread.Mutex` on `Engine` with reader/writer lock. | Add a TSan stress test (`zig build test-stress -Dtsan=true`) that drives concurrent index/search/flush; today this races, after the fix expect clean TSan output. |
-| 5 | PERF-0004 / RF-04 | SegmentWriter unbuffered tiny writes (≈5M syscalls/flush) | io | P1 | 64 | `src/segment.zig:119, 129, 130, 134, 138, 149, 153, 161, 167, 182, 187` | Wrap segment files in `BufferedWriter` (≥64 KiB), or accumulate to an arena `[]u8` and do one `writeStreamingAll`. | Use `strace -c -e write zig build test` before/after — write count should drop by ~3 orders of magnitude; bench `flush()` latency for a 100k-term memtable. |
-| 6 | PERF-0006 / RF-06 | `TermIterator.isDeleted` O(segments) per match | algo | P1 | 64 | `src/search.zig:56–62` | Maintain an engine-aggregated `tombstone_set: AutoHashMap(u64, void)` rebuilt on flush; query checks it once instead of looping segments. | Bench query over 16-segment store with 1k matches; expect query latency drops linearly with segment count after fix; assert allocation count constant. |
-| 7 | PERF-0002 / RF-02 | WAL writer alloc-per-record + redundant memcpy | memory | P1 | 64 | `src/wal.zig:22–36, 91–95` | Reuse a per-writer scratch buffer; serialize in place + `writePositionalAll`; skip the memcpy by writing fields directly into the file buffer. | `--track-allocations` bench delta: alloc_count per ingest op drops from N to 0; wall_ns_p50 of `indexDocument` improves measurably under high QPS. |
+| 5 | PERF-0004 / RF-04 | SegmentWriter unbuffered tiny writes (≈5M syscalls/flush) | io | P1 | 64 | `src/segment.zig:119, 129, 130, 134, 138, 149, 153, 161, 167, 182, 187` | Wrap segment files in `BufferedWriter` (≥64 KiB), or accumulate to an arena `[]u8` and do one `writeStreamingAll`. | Use `strace -c -e write zig build test` before/after — write count should drop by ~3 orders of magnitude; bench `flush()` latency for a 100k-term memtable. **Status: Closed — commit caf5831** |
+| 6 | PERF-0006 / RF-06 | `TermIterator.isDeleted` O(segments) per match | algo | P1 | 64 | `src/search.zig:56–62` | Maintain an engine-aggregated `tombstone_set: AutoHashMap(u64, void)` rebuilt on flush; query checks it once instead of looping segments. | Bench query over 16-segment store with 1k matches; expect query latency drops linearly with segment count after fix; assert allocation count constant. **Status: Closed — commit ab17a07** |
+| 7 | PERF-0002 / RF-02 | WAL writer alloc-per-record + redundant memcpy | memory | P1 | 64 | `src/wal.zig:22–36, 91–95` | Reuse a per-writer scratch buffer; serialize in place + `writePositionalAll`; skip the memcpy by writing fields directly into the file buffer. | `--track-allocations` bench delta: alloc_count per ingest op drops from N to 0; wall_ns_p50 of `indexDocument` improves measurably under high QPS. **Status: Partial — commit 49872dd eliminated per-record alloc churn; true group commit (N-record batch fsync) deferred to subsequent run** |
 | 8 | PERF-0003 / RF-03 | Memtable: `dupe` per term + `ArrayList(u32)` per posting | memory | P1 | 64 | `src/segment.zig:60, 67–73` | Switch memtable to an arena allocator; intern terms via a per-arena string set; back postings by a packed slab of `(doc_id, tf, pos_offset)`; positions in a single big `ArrayListUnmanaged(u32)`. | TrackingAllocator: alloc_count for 100k-doc ingest drops by ~10×; flush wall time improves; arena bulk-free at flush reduces tail latency. |
-| 9 | PERF-0005 / RF-05 | `SegmentReader.search` opens dir+file per query | io | P1 | 64 | `src/segment.zig:280–309` | Cache `seg_dir` and `postings.bin` `std.Io.File` at `SegmentReader.init`; consider `mmap` for `postings.bin` so reads become slice ops. | Bench: 10k cold queries vs cached fd — expect open()/openat syscalls drop to 0 in steady state; p99 latency reduces 2–5×. |
+| 9 | PERF-0005 / RF-05 | `SegmentReader.search` opens dir+file per query | io | P1 | 64 | `src/segment.zig:280–309` | Cache `seg_dir` and `postings.bin` `std.Io.File` at `SegmentReader.init`; consider `mmap` for `postings.bin` so reads become slice ops. | Bench: 10k cold queries vs cached fd — expect open()/openat syscalls drop to 0 in steady state; p99 latency reduces 2–5×. **Status: Closed — commit b620a03** |
 | 10 | PERF-0010 / ZG-03 | `flush` blocks writers; no auto-flush trigger; no bg flush | concurrency | P1 | 48 | `src/engine.zig:234–276` | Move `flush` to a background thread; trigger on `memtable.dictionary.count() > N` or `bytes > B`; double-buffer memtable so writers continue during flush. | Stress bench: sustained ingest with manual flush vs auto-bg flush — expect p99 ingest latency drops from "flush stall" spikes to flat; measure with histogram. |
-| 11 | PERF-0007 / RF-07 | `SegmentReader.search` allocs posting buffer per query | memory | P1 | 48 | `src/segment.zig:282` | Reuse a scratch buffer on the iterator, or hand back an mmap'd `[]const u8` and skip the allocation entirely. | Bench query-only loop with `--track-allocations`: alloc_count per query drops to ≤1; latency improves. |
-| 12 | PERF-0021 | Throughput stddev computed around median, not mean — gate too loose | ci-gate | P1 | 48 | `benchmarks/framework.zig:281–283`; `benchmarks/compare.zig:79–86` | Compute throughput stddev about the throughput **mean**, not median; or use absolute deviation; document the statistic. | Synthetic test data with known distribution; verify reported stddev matches manual numpy/statistics computation within rounding. |
+| 11 | PERF-0007 / RF-07 | `SegmentReader.search` allocs posting buffer per query | memory | P1 | 48 | `src/segment.zig:282` | Reuse a scratch buffer on the iterator, or hand back an mmap'd `[]const u8` and skip the allocation entirely. | Bench query-only loop with `--track-allocations`: alloc_count per query drops to ≤1; latency improves. **Status: Closed — commit b620a03** |
+| 12 | PERF-0021 | Throughput stddev computed around median, not mean — gate too loose | ci-gate | P1 | 48 | `benchmarks/framework.zig:281–283`; `benchmarks/compare.zig:79–86` | Compute throughput stddev about the throughput **mean**, not median; or use absolute deviation; document the statistic. | Synthetic test data with known distribution; verify reported stddev matches manual numpy/statistics computation within rounding. **Status: Closed — commit f14196b** |
 | 13 | PERF-0011 / RF-08 | `indexDocument` double-serializes positions; no capacity hint on `payload_list` | memory | P1 | 48 | `src/engine.zig:185–205` | Compute serialized size upfront, `ensureTotalCapacity`; merge the payload-serialize and `memtable.addPosting` passes; share one scratch buffer. | After change: track allocations during a 1k-doc ingest; expect alloc_count drops; wall_ns_p50 improves. |
-| 14 | PERF-0019 | Replay aborts on Incomplete/ChecksumMismatch instead of last-good truncate | io | P1 | 48 | `src/engine.zig:124`; `src/wal.zig:149, 168, 179` | On `error.Incomplete` / `error.ChecksumMismatch` at tail, truncate WAL to the last valid record offset and continue; only error on mid-file corruption. | Crash-injection test: kill process mid-fsync, restart, expect engine recovers and replays prior records; today this errors out. |
-| 15 | PERF-0022 | warmup=1 + samples=6 insufficient; no CPU pinning, governor check, cache flush, outlier rejection | harness | P1 | 48 | `benchmarks/framework.zig:45–48, 231–272` | Bump defaults to warmup≥3, samples≥30; add `taskset`/`sched_setaffinity`; require performance governor (or warn); add MAD-based outlier filter. | Run identical scenario 10× back-to-back; relative stddev should drop from typical >5% to <1.5%. |
-| 16 | PERF-0026 | CI benchmark-regression `allow_failure:true`; no `baseline.json` | ci-gate | P1 | 48 | `.gitlab-ci.yml:249, 251–269` | Commit a reproducible `benchmarks/results/baseline.json`; drop `allow_failure:true`; require explicit override label for baseline updates. | Push a synthetic 20% regression on a feature branch; verify CI fails the job. |
+| 14 | PERF-0019 | Replay aborts on Incomplete/ChecksumMismatch instead of last-good truncate | io | P1 | 48 | `src/engine.zig:124`; `src/wal.zig:149, 168, 179` | On `error.Incomplete` / `error.ChecksumMismatch` at tail, truncate WAL to the last valid record offset and continue; only error on mid-file corruption. | Crash-injection test: kill process mid-fsync, restart, expect engine recovers and replays prior records; today this errors out. **Status: Closed — commit 5ab5f67** |
+| 15 | PERF-0022 | warmup=1 + samples=6 insufficient; no CPU pinning, governor check, cache flush, outlier rejection | harness | P1 | 48 | `benchmarks/framework.zig:45–48, 231–272` | Bump defaults to warmup≥3, samples≥30; add `taskset`/`sched_setaffinity`; require performance governor (or warn); add MAD-based outlier filter. | Run identical scenario 10× back-to-back; relative stddev should drop from typical >5% to <1.5%. **Status: Closed — commit f14196b** |
+| 16 | PERF-0026 | CI benchmark-regression `allow_failure:true`; no `baseline.json` | ci-gate | P1 | 48 | `.gitlab-ci.yml:249, 251–269` | Commit a reproducible `benchmarks/results/baseline.json`; drop `allow_failure:true`; require explicit override label for baseline updates. | Push a synthetic 20% regression on a feature branch; verify CI fails the job. **Status: Closed — commit f14196b** |
 | 17 | PERF-0013 | `atomicWrite` missing `fsync(dir)` — durability broken | io | P1 | 48 | `src/utils.zig:48–60` | After rename, open the parent dir and `dir.sync(io)`; or use `posix.fsync` on the directory fd. | Crash-test: rename then power-loss simulation (`fsfreeze` or fault injection); manifest must be readable post-crash. **Status: Closed — commit ff28470** |
-| 18 | PERF-0014 | WAL replay not torn-write tolerant | io | P1 | 48 | `src/wal.zig:141–189`; `src/engine.zig:116–145` | Detect torn record at EOF (header read short or payload short), treat as soft EOF, log, and truncate to last good offset. | Inject a tail-truncated WAL by removing last N bytes; engine must replay everything up to the truncation without error. |
+| 18 | PERF-0014 | WAL replay not torn-write tolerant | io | P1 | 48 | `src/wal.zig:141–189`; `src/engine.zig:116–145` | Detect torn record at EOF (header read short or payload short), treat as soft EOF, log, and truncate to last good offset. | Inject a tail-truncated WAL by removing last N bytes; engine must replay everything up to the truncation without error. **Status: Closed — commit 5ab5f67** |
 | 19 | PERF-0008 / RF-09 | `SegmentReader.load` field-by-field reads | io | P2 | 36 | `src/segment.zig:345–366` (every term: 1+2+8+8+8 bytes via 5 separate `readStreaming` calls) | Read the whole `terms.hash` into one buffer via `stat()` + `readPositional`, parse from memory; use an arena for term strings. | Bench `SegmentReader.init` across a 100k-term segment: expect open-to-ready time drops 5–20×. |
 | 20 | PERF-0017 / ZG-06 | Per-segment dictionary in RAM (~80–100MB at 100k terms × 16 segments) | memory | P2 | 36 | `src/segment.zig:201, 211–222, 345–366`; `src/engine.zig:71–74` | Move dictionaries to on-disk FST or BTree (terms.fst as named); keep only top-of-FST cache hot; share term interner across segments. | Measure RSS with `readRssCurrent` before/after open of 16-segment 100k-term store; expect 5–10× RSS reduction. |
 | 21 | PERF-0016 / ZG-07 | `MemPosting` AoS layout — SoA needed for prefetch | cache | P2 | 36 | `src/segment.zig:9–20` | Convert `MemPostingsList` to SoA: `doc_ids: []u64, tfs: []u32, positions_offsets: []u32, positions_pool: []u32`. | After SoA: `perf stat -e LLC-load-misses` on flush — expect 30–60% drop; flush wall time improves. |
@@ -103,14 +103,32 @@ P0 items measured during invalid benches (e.g. PERF-0020/PERF-0025) intentionall
 
 ---
 
-## Closed Items (2026-05-26 closure run)
+## Closed Items (2026-05-26 closure runs)
 
 | ID | Title | Commit |
 |----|-------|--------|
+| PERF-0004 | SegmentWriter unbuffered tiny writes | caf5831 |
+| PERF-0005 | `SegmentReader.search` opens dir+file per query | b620a03 |
+| PERF-0006 | `TermIterator.isDeleted` O(segments) per match | ab17a07 |
+| PERF-0007 | `SegmentReader.search` allocs posting buffer per query | b620a03 |
 | PERF-0013 | `atomicWrite` missing `fsync(dir)` — durability broken | ff28470 |
+| PERF-0014 | WAL replay not torn-write tolerant | 5ab5f67 |
+| PERF-0019 | Replay aborts on Incomplete/ChecksumMismatch | 5ab5f67 |
+| PERF-0020 | Bench scenarios call `lib.init` stub | f14196b |
+| PERF-0021 | Throughput stddev computed around median, not mean | f14196b |
+| PERF-0022 | warmup=1 + samples=6 insufficient | f14196b |
+| PERF-0025 | `lib_module` not forced to ReleaseFast for bench | f14196b |
+| PERF-0026 | CI benchmark-regression `allow_failure:true` | f14196b |
 | PERF-0028 | Manifest deserialize: unbounded segment count | 496de3c |
 
-**27 findings remain open; all are deferred to subsequent /gap:close run.**
+**Partial:**
+
+| ID | Title | Commit | Notes |
+|----|-------|--------|-------|
+| PERF-0001 | WAL fsync per record; no group commit | 49872dd | Per-record alloc churn eliminated; true N-record batch fsync deferred |
+| PERF-0002 | WAL writer alloc-per-record + redundant memcpy | 49872dd | Alloc churn eliminated; group commit (fsync batching) deferred |
+
+**16 findings remain open; all are deferred to subsequent /gap:close run.**
 
 ---
 
@@ -218,13 +236,13 @@ P0 items measured during invalid benches (e.g. PERF-0020/PERF-0025) intentionall
 
 ## Counts
 
-| PerfSeverity | Total | Closed | Open |
-|---|---|---|---|
-| P0 | 4 | 0 | 4 |
-| P1 | 14 | 1 (PERF-0013) | 13 |
-| P2 | 10 | 1 (PERF-0028) | 9 |
-| P3 | 1 | 0 | 1 |
-| **Total tracked** | **29** | **2** | **27** |
+| PerfSeverity | Total | Closed | Partial | Open |
+|---|---|---|---|---|
+| P0 | 4 | 2 (PERF-0020, PERF-0025) | 1 (PERF-0001) | 1 |
+| P1 | 14 | 9 (PERF-0002 partial→closed: 0; PERF-0005,0006,0007,0013,0014,0019,0021,0022,0026) | 1 (PERF-0002) | 4 |
+| P2 | 10 | 1 (PERF-0028) | 0 | 9 |
+| P3 | 1 | 0 | 0 | 1 |
+| **Total tracked** | **29** | **13** | **2** | **16** |
 
 (Phase-2 scanner emitted RF-01..14, BC-01..05, ZG-01..07 = 26 scanner IDs; Phase-3 reviewer emitted PERF-0001..0030 = 30 reviewer IDs; the table above is keyed on the 29 distinct reviewer findings tracked, with one reviewer ID intentionally collapsed into the cross-cutting themes section to avoid double-counting.)
 

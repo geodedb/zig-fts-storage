@@ -36,6 +36,9 @@ default:
   - company
 
 include:
+  # SEC-08 / SEC-EXT-0503: catalog components currently pinned to mutable semver
+  # tags. SHA-pinning requires upstream devnw/ci-catalog to publish immutable
+  # refs. Tracked as Won't-Do in docs/SECURITY_GAP_ANALYSIS.md.
   # Security scanning
 - component: gitlab.com/devnw/ci-catalog/security-sast@v1.7.1
 - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1.7.1

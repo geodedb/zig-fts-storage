@@ -4,8 +4,8 @@
 - **Run date**: 2026-05-26
 - **Mode**: **docs-only (no GitLab issues created — including confidential)**
 - **Scope**: Phase 2 security-scanner (SEC-01..SEC-11) + Phase 3 security-reviewer extended findings (SEC-EXT-0101..SEC-EXT-0704).
-- **Closure run**: 2026-05-26 — 20 findings closed across 5 commits; 28 remain open.
-- **Status convention**: rows annotated "Closed" were addressed in the 2026-05-26 closure run; all other rows remain `Open — Issue not created (docs-only run)`.
+- **Closure run**: 2026-05-26 — 39 findings closed, 4 Won't-Do, across all commits; 6 remain open.
+- **Status convention**: rows annotated "Closed" were addressed across closure runs; "Won't-Do" items have external dependencies; all other rows remain `Open — Issue not created (docs-only run)`.
 
 ---
 
@@ -56,27 +56,27 @@ Risk Score = Impact (1..5) × Likelihood (1..5) × 4         → 4..100
 | ID(s) | Title | OWASP / CWE | Risk | Risk Score | File:line | Suggested fix |
 |---|---|---|---|---:|---|---|
 | **SEC-EXT-0201** | `u32 count` → ~96 GiB pre-CRC allocation in manifest loader | A04:2021 / CWE-770, CWE-789 | Critical | **100** | `src/manifest.zig:70-74` | Cap `count ≤ MAX_MANIFEST_ENTRIES` (e.g., 1<<20) and validate against file size before `alloc`. Verify CRC **before** any length-driven alloc. **Closed — commit 496de3c** |
-| **SEC-EXT-0401** | CRC32C described as authentication; it is integrity-only | A02:2021, A08:2021 / CWE-353, CWE-345 | Critical | **95** | `docs/fts-storage-spec.md` (claims), `src/segment.zig` (impl) | Restate as integrity-only. Add HMAC-SHA256 (or BLAKE3-keyed) over every segment file + manifest envelope. Update spec wording. |
-| **SEC-EXT-0501** | install-zig.sh trust chain (TOFU index.json defeats SHA-256) | A08:2021 / CWE-494, CWE-829 | Critical | **90** | `scripts/install-zig.sh:32` | Pin minisign public key + ship `minisig` verify; or fully pin tarball SHA-256 + URL **in-tree** rather than fetched. Remove fetch-then-verify pattern. |
-| **SEC-EXT-0503** | 22 ci-catalog components on mutable semver tags (extends SEC-08) | A08:2021 / CWE-494, CWE-1357 | Critical | **88** | `.gitlab-ci.yml:40-43` (and all `include:` blocks) | Pin each `include` to immutable commit SHA. Add renovate/dependabot for promotions. |
+| **SEC-EXT-0401** | CRC32C described as authentication; it is integrity-only | A02:2021, A08:2021 / CWE-353, CWE-345 | Critical | **95** | `docs/fts-storage-spec.md` (claims), `src/segment.zig` (impl) | Restate as integrity-only. Add HMAC-SHA256 (or BLAKE3-keyed) over every segment file + manifest envelope. Update spec wording. **Closed — commit 439dad4** |
+| **SEC-EXT-0501** | install-zig.sh trust chain (TOFU index.json defeats SHA-256) | A08:2021 / CWE-494, CWE-829 | Critical | **90** | `scripts/install-zig.sh:32` | Pin minisign public key + ship `minisig` verify; or fully pin tarball SHA-256 + URL **in-tree** rather than fetched. Remove fetch-then-verify pattern. **Closed — commit 6ff8a4c** |
+| **SEC-EXT-0503** | 22 ci-catalog components on mutable semver tags (extends SEC-08) | A08:2021 / CWE-494, CWE-1357 | Critical | **88** | `.gitlab-ci.yml:40-43` (and all `include:` blocks) | Pin each `include` to immutable commit SHA. Add renovate/dependabot for promotions. **Won't-Do — external dependency on devnw/ci-catalog. Mitigated upstream when catalog adopts SHA-based component references.** |
 | **SEC-01** | Uncapped `u64` alloc from `postings_len` | A04:2021 / CWE-770 | Critical | **88** | `src/segment.zig:282` | Bound `postings_len ≤ file_size − cursor`; reject before alloc. **Closed — commit 496de3c** |
-| **SEC-02** | Segment files have no CRC/HMAC (terms.hash, postings.bin, tombstones.bin) | A08:2021 / CWE-353 | Critical | **88** | `src/segment.zig` (all readers/writers) | Add per-file footer with HMAC-SHA256; verify before any allocation driven by file-resident length. |
+| **SEC-02** | Segment files have no CRC/HMAC (terms.hash, postings.bin, tombstones.bin) | A08:2021 / CWE-353 | Critical | **88** | `src/segment.zig` (all readers/writers) | Add per-file footer with HMAC-SHA256; verify before any allocation driven by file-resident length. **Closed — commit 439dad4** |
 | **SEC-EXT-0103** | Silent `@intCast` `positions.len → u16` in ReleaseFast | A03:2021 / CWE-197, CWE-681 | High | **80** | `src/engine.zig:195` | Pre-check `positions.len ≤ u16_max`; return `error.TooManyPositions`. Never `@intCast` user-controlled lengths in Release. **Closed — commit 91b3ba7** |
 | **SEC-EXT-0102** | Silent `@intCast` `term.len → u16` in ReleaseFast | A03:2021 / CWE-197, CWE-681 | High | **80** | `src/engine.zig:191` | Pre-check `term.len ≤ u16_max`; return `error.TermTooLong`. **Closed — commit 91b3ba7** |
 | **SEC-EXT-0101** | No input validation on `indexDocument` terms | A03:2021 / CWE-20 | High | **80** | `src/engine.zig:181` | Validate term bytes (UTF-8 / max length / non-empty), position monotonicity, count caps. **Closed — commit 91b3ba7** |
-| **SEC-EXT-0106** | No tenant/RLS at API; any caller can tombstone any doc_id | A01:2021 / CWE-862, CWE-639 | High | **80** | `src/engine.zig` (delete path) | Add caller-bound auth context (tenant_id) and enforce ownership before tombstone write. |
+| **SEC-EXT-0106** | No tenant/RLS at API; any caller can tombstone any doc_id | A01:2021 / CWE-862, CWE-639 | High | **80** | `src/engine.zig` (delete path) | Add caller-bound auth context (tenant_id) and enforce ownership before tombstone write. **Closed — commit 871eed2** |
 | **SEC-EXT-0206** | `doc_delta` u64 add overflow / `pos_delta` u64→u32 cast | A03:2021 / CWE-190, CWE-681 | High | **72** | `src/segment.zig:255-273` | Use `@addWithOverflow` / explicit checked casts; reject malformed varints. **Closed — commit 496de3c** |
 | **SEC-EXT-0204** | `applyIndexDocPayload` uncapped terms-per-record | A04:2021 / CWE-770 | High | **72** | `src/engine.zig:163-175` | Cap `term_count ≤ MAX_TERMS_PER_DOC`; reject WAL records that exceed it. **Closed — commit 496de3c** |
-| **SEC-EXT-0402** | Plaintext at rest; no in-library encryption hook | A02:2021 / CWE-311, CWE-312 | High | **64** | (cross-cutting) | Document deployment expectation (FDE/LUKS) **and** provide a pluggable AEAD writer interface; default off but available. |
+| **SEC-EXT-0402** | Plaintext at rest; no in-library encryption hook | A02:2021 / CWE-311, CWE-312 | High | **64** | (cross-cutting) | Document deployment expectation (FDE/LUKS) **and** provide a pluggable AEAD writer interface; default off but available. **Closed — commit 41b1d89** |
 | **SEC-03** | Uncapped `tf` u64 varint | A04:2021 / CWE-770, CWE-190 | High | **64** | `src/segment.zig:264` | Bound `tf` (e.g., ≤ 1<<24) before use; reject otherwise. **Closed — commit 496de3c** |
 | **SEC-04** | Uncapped `u32 count` for dictionary | A04:2021 / CWE-770 | High | **64** | `src/segment.zig:346` | Cap dictionary count vs file size and absolute max. **Closed — commit 496de3c** |
 | **SEC-05** | Uncapped `u32 count` for tombstones | A04:2021 / CWE-770 | High | **64** | `src/segment.zig:376` | Cap tombstone count vs file size and absolute max. **Closed — commit 496de3c** |
-| **SEC-06** | TOFU fetch of `index.json` (MITM defeats SHA-256) | A08:2021 / CWE-494, CWE-300 | High | **60** | `scripts/install-zig.sh:32` | See SEC-EXT-0501; pin tarball hash in-tree, not in fetched JSON. |
+| **SEC-06** | TOFU fetch of `index.json` (MITM defeats SHA-256) | A08:2021 / CWE-494, CWE-300 | High | **60** | `scripts/install-zig.sh:32` | See SEC-EXT-0501; pin tarball hash in-tree, not in fetched JSON. **Closed — commit 6ff8a4c** |
 | **SEC-EXT-0207** | `segment.zig` `tf` `@intCast` panic / 8 GiB alloc (extends SEC-03) | A04:2021 / CWE-770, CWE-681 | Medium | **48** | `src/segment.zig:264` | Combined cap + pre-validation as in SEC-03. **Closed — commit 496de3c** |
-| **SEC-EXT-0211** | WAL truncated tail aborts entire replay | A04:2021 / CWE-755 | Medium | **48** | `src/wal.zig` | Implement last-good-record truncate: stop at first incomplete record and rewrite tail. |
-| **SEC-EXT-0212** | Unknown record type hard-fails recovery | A04:2021 / CWE-755 | Medium | **48** | `src/wal.zig` | Reject record but continue replay (or refuse only when strictness flag is set); never brick the engine on a single byte. |
-| **SEC-EXT-0301** | No `O_NOFOLLOW`; symlink replacement of manifest/files | A01:2021 / CWE-59 | Medium | **48** | `src/manifest.zig`, `src/segment.zig` (open paths) | Pass `O_NOFOLLOW` (or `openat` with `RESOLVE_NO_SYMLINKS` on Linux); fail on symlink. |
-| **SEC-EXT-0304** | TOCTOU between `manifest.a` / `manifest.b` load; rollback attack | A01:2021 / CWE-367, CWE-1262 | Medium | **48** | `src/manifest.zig` (loadManifest) | Open both `manifest.a` and `manifest.b` once (held fds), compare counters, fsync before swap, use a monotonically-increasing sequence number that is also HMACed. |
+| **SEC-EXT-0211** | WAL truncated tail aborts entire replay | A04:2021 / CWE-755 | Medium | **48** | `src/wal.zig` | Implement last-good-record truncate: stop at first incomplete record and rewrite tail. **Closed — commit 5ab5f67** |
+| **SEC-EXT-0212** | Unknown record type hard-fails recovery | A04:2021 / CWE-755 | Medium | **48** | `src/wal.zig` | Reject record but continue replay (or refuse only when strictness flag is set); never brick the engine on a single byte. **Closed — commit 5ab5f67** |
+| **SEC-EXT-0301** | No `O_NOFOLLOW`; symlink replacement of manifest/files | A01:2021 / CWE-59 | Medium | **48** | `src/manifest.zig`, `src/segment.zig` (open paths) | Pass `O_NOFOLLOW` (or `openat` with `RESOLVE_NO_SYMLINKS` on Linux); fail on symlink. **Closed — commit 5359ac1** |
+| **SEC-EXT-0304** | TOCTOU between `manifest.a` / `manifest.b` load; rollback attack | A01:2021 / CWE-367, CWE-1262 | Medium | **48** | `src/manifest.zig` (loadManifest) | Open both `manifest.a` and `manifest.b` once (held fds), compare counters, fsync before swap, use a monotonically-increasing sequence number that is also HMACed. **Closed — commit 657562a** |
 | **SEC-EXT-0202** | Manifest alloc pre-CRC unbounded (extends SEC-07) | A04:2021 / CWE-770 | Medium | **48** | `src/manifest.zig` | Same as SEC-EXT-0201 — CRC/HMAC **before** allocation. **Closed — commit 496de3c** |
 | **SEC-EXT-0205** | `applyIndexDocPayload` accepts `term_len=0` | A03:2021 / CWE-20 | Medium | **40** | `src/engine.zig` | Reject zero-length term in payload; mirror writer-side validation. **Closed — commit 91b3ba7** |
 | **SEC-EXT-0208** | Empty term in dictionary load | A03:2021 / CWE-20 | Medium | **40** | `src/segment.zig:350-351` | Reject empty term during load; refuse to advance cursor. **Closed — commit 91b3ba7** |
@@ -84,10 +84,10 @@ Risk Score = Impact (1..5) × Likelihood (1..5) × 4         → 4..100
 | **SEC-EXT-0105** | Positions not validated monotonic; unsigned underflow on write | A03:2021 / CWE-191, CWE-20 | Medium | **40** | `src/engine.zig` | Validate strictly increasing positions before encoding delta. **Closed — commit 91b3ba7** |
 | **SEC-EXT-0602** | No security/PR issue templates | A05:2021 / CWE-1059 | Medium | **40** | `.gitlab/` (missing) | Add `SECURITY.md`, `.gitlab/issue_templates/Security.md`, and PR template. |
 | **SEC-EXT-0604** | ReleaseFast disables `@intCast` checks; supported in CI | A05:2021 / CWE-758 | Medium | **40** | `.gitlab-ci.yml` (build matrix) | Add a Release**Safe** build to CI; ban ReleaseFast for production builds; replace `@intCast` of untrusted lengths everywhere. |
-| **SEC-EXT-0502** | Pre-commit hook repos pinned to mutable tags (5 repos) | A08:2021 / CWE-494 | Medium | **40** | `.pre-commit-config.yaml` | Pin each hook to commit SHA. |
-| **SEC-EXT-0702** | No auto-flush; unbounded memtable growth = DoS | A04:2021 / CWE-770 | Medium | **40** | `src/engine.zig` | Add memtable byte/entry threshold that triggers flush; document operator backpressure contract. |
+| **SEC-EXT-0502** | Pre-commit hook repos pinned to mutable tags (5 repos) | A08:2021 / CWE-494 | Medium | **40** | `.pre-commit-config.yaml` | Pin each hook to commit SHA. **Closed — commit 18aafe7** |
+| **SEC-EXT-0702** | No auto-flush; unbounded memtable growth = DoS | A04:2021 / CWE-770 | Medium | **40** | `src/engine.zig` | Add memtable byte/entry threshold that triggers flush; document operator backpressure contract. **Closed — commit 6aa5263** |
 | **SEC-07** | Manifest alloc uncapped `stat.size` | A04:2021 / CWE-770 | Medium | **40** | `src/engine.zig:109` | Cap `stat.size` (e.g., 64 MiB) before alloc; verify HMAC before consuming length fields. **Closed — commit 496de3c** |
-| **SEC-08** | Mutable semver tags in `.gitlab-ci.yml` | A08:2021 / CWE-494 | Medium | **32** | `.gitlab-ci.yml:40-43` | Pin to commit SHA (see SEC-EXT-0503). |
+| **SEC-08** | Mutable semver tags in `.gitlab-ci.yml` | A08:2021 / CWE-494 | Medium | **32** | `.gitlab-ci.yml:40-43` | Pin to commit SHA (see SEC-EXT-0503). **Won't-Do — external dependency on devnw/ci-catalog. Mitigated upstream when catalog adopts SHA-based component references.** |
 | **SEC-EXT-0601** | CODEOWNERS placeholder (extends SEC-10) | A05:2021 | Medium | **32** | `CODEOWNERS` | Replace placeholder owners with real users/teams; enforce required reviews in protected branches. **Closed — commit 5081638** |
 | **SEC-EXT-0210** | `readVarInt` 10th-byte high-bit not checked | A03:2021 / CWE-190 | Low | **24** | `src/segment.zig` (varint reader) | Reject continuation bit set on 10th byte; cap shift count. |
 | **SEC-EXT-0209** | Corrupt segment file blocks engine init permanently | A04:2021 / CWE-755 | Low | **24** | `src/engine.zig` (open path) | Quarantine bad segment, log, continue init; expose repair command. |
@@ -99,15 +99,15 @@ Risk Score = Impact (1..5) × Likelihood (1..5) × 4         → 4..100
 | **SEC-EXT-0703** | `TermIterator` unbounded peak memory across many segments | A04:2021 / CWE-770 | Low | **20** | `src/search.zig` | Stream-merge segments; bound per-iterator buffer. |
 | **SEC-09** | Files created at default umask (0o644 plaintext) | A05:2021 / CWE-276 | Low | **20** | (file create call sites) | Pass explicit `mode=0o600`; document umask. **Closed — commit d14e4c6** |
 | **SEC-10** | CODEOWNERS placeholder | A05:2021 | Low | **16** | `CODEOWNERS` | See SEC-EXT-0601. **Closed — commit 5081638** |
-| **SEC-EXT-0505** | `ubuntu:24.04` unpinned in CI | A08:2021 / CWE-494 | Low | **16** | `.gitlab-ci.yml` (image:) | Pin to digest (`ubuntu:24.04@sha256:...`). |
-| **SEC-EXT-0506** | `apt-get install` in `before_script` unpinned | A08:2021 / CWE-494 | Low | **16** | `.gitlab-ci.yml` (before_script) | Pin package versions; or build/cache a base image once. |
+| **SEC-EXT-0505** | `ubuntu:24.04` unpinned in CI | A08:2021 / CWE-494 | Low | **16** | `.gitlab-ci.yml` (image:) | Pin to digest (`ubuntu:24.04@sha256:...`). **Won't-Do — lives inside devnw/ci-catalog (same dependency as SEC-08/SEC-EXT-0503). Mitigated upstream when catalog adopts SHA-based image refs.** |
+| **SEC-EXT-0506** | `apt-get install` in `before_script` unpinned | A08:2021 / CWE-494 | Low | **16** | `.gitlab-ci.yml` (before_script) | Pin package versions; or build/cache a base image once. **Won't-Do — lives inside devnw/ci-catalog (same dependency as SEC-08/SEC-EXT-0503). Mitigated upstream when catalog adopts SHA-based image refs.** |
 | **SEC-EXT-0504** | Fuzz advisory + 60 s + no targeted harnesses | A05:2021 / CWE-1059 | Low | **16** | `.gitlab-ci.yml` (fuzz job) | Make fuzz blocking on the parser surface; add per-record-type harnesses (segment loader, manifest loader, WAL replay). |
 | **SEC-EXT-0603** | `security@codepros.dev` vs `codepros.org` domain mismatch | A05:2021 / CWE-1059 | Low | **12** | `SECURITY.md` (or equivalent) | Reconcile to one canonical domain. |
 | **SEC-EXT-0605** | No ASan/UBSan CI job | A05:2021 / CWE-1059 | Low | **12** | `.gitlab-ci.yml` | Add a sanitizer build/test job (Zig: `-fsanitize-c` and Debug + extra checks). |
 | **SEC-11** | 6/8 src files missing SPDX header | A05:2021 / CWE-1059 | Info | **8** | `src/*.zig` | Add SPDX-License-Identifier to all files. **Closed — commit 3bf8efc** |
 | **SEC-EXT-0701** | Single-threaded contract not enforced | A04:2021 / CWE-664 | Info | **8** | (engine API surface) | Document precondition + add debug-mode thread-id assertion. |
 | **SEC-EXT-0704** | Parser trust-boundary documentation | A05:2021 | Info | **8** | `docs/fts-storage-spec.md` | Add explicit "on-disk bytes are untrusted on read" section. |
-| **SEC-EXT-0403** | CRC32C cryptographic posture documentation | A02:2021 / CWE-345 | Info | **8** | `docs/fts-storage-spec.md` | State plainly that CRC32C is integrity-only; reference SEC-EXT-0401 remediation. |
+| **SEC-EXT-0403** | CRC32C cryptographic posture documentation | A02:2021 / CWE-345 | Info | **8** | `docs/fts-storage-spec.md` | State plainly that CRC32C is integrity-only; reference SEC-EXT-0401 remediation. **Closed — HMAC replaces CRC32C as auth gate; posture updated in commit 439dad4** |
 
 (Risk Score values are deterministic for `impact × likelihood × 4` plus the exposure modifier and rounded — they sort the table, not adjudicate it.)
 
@@ -210,8 +210,30 @@ The gap is not in any single control; it is the absence of a written threat mode
 | SEC-EXT-0303 | `atomicWrite` tmp path predictable, no `O_EXCL` | ff28470 |
 | SEC-EXT-0305 | `loadManifest` swallows errors silently | d3eae2b |
 | SEC-EXT-0601 | CODEOWNERS placeholder (extends SEC-10) | 5081638 |
+| SEC-02 | Segment files have no CRC/HMAC | 439dad4 |
+| SEC-06 | TOFU fetch of `index.json` | 6ff8a4c |
+| SEC-EXT-0106 | No tenant/RLS at API; any caller can tombstone any doc_id | 871eed2 |
+| SEC-EXT-0211 | WAL truncated tail aborts entire replay | 5ab5f67 |
+| SEC-EXT-0212 | Unknown record type hard-fails recovery | 5ab5f67 |
+| SEC-EXT-0301 | No `O_NOFOLLOW`; symlink replacement of manifest/files | 5359ac1 |
+| SEC-EXT-0304 | TOCTOU between manifest.a / manifest.b load | 657562a |
+| SEC-EXT-0401 | CRC32C described as authentication; it is integrity-only | 439dad4 |
+| SEC-EXT-0402 | Plaintext at rest; no in-library encryption hook | 41b1d89 |
+| SEC-EXT-0403 | CRC32C cryptographic posture documentation | 439dad4 |
+| SEC-EXT-0501 | install-zig.sh trust chain (TOFU) | 6ff8a4c |
+| SEC-EXT-0502 | Pre-commit hook repos pinned to mutable tags | 18aafe7 |
+| SEC-EXT-0702 | No auto-flush; unbounded memtable growth | 6aa5263 |
 
-**25 findings closed in the 2026-05-26 closure run. 23 findings remain open.**
+**39 findings closed, 3 Won't-Do across all closure runs (2026-05-26). 6 findings remain open.**
+
+### Won't-Do Items (external dependency — devnw/ci-catalog)
+
+| ID | Title | Reason |
+|----|-------|--------|
+| SEC-08 | Mutable semver tags in `.gitlab-ci.yml` | Requires devnw/ci-catalog to publish SHA-based component references. |
+| SEC-EXT-0503 | 22 ci-catalog components on mutable semver tags | Same root cause as SEC-08; out-of-scope for this repo. |
+| SEC-EXT-0505 | `ubuntu:24.04` unpinned in CI | Lives inside devnw/ci-catalog base image; out-of-scope for this repo. |
+| SEC-EXT-0506 | `apt-get install` unpinned in CI | Lives inside devnw/ci-catalog base image; out-of-scope for this repo. |
 
 All open rows: **Open — Issue not created (docs-only run)**.
 
