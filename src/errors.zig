@@ -54,4 +54,10 @@ pub const EngineError = error{
     /// because one of its TermPostings carries a matching `field` tag
     /// (GAP-0010).
     FieldExcluded,
+    /// WAL replay accumulated more aggregate payload bytes than the
+    /// configured cap (SEC-EXT-0203). Each individual record is already
+    /// bounded by `MAX_WAL_PAYLOAD_BYTES`, but a sufficiently long WAL can
+    /// still exhaust memory across many records — this aggregate bound is
+    /// the second line of defense.
+    WalTooLarge,
 };

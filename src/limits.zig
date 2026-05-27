@@ -13,6 +13,15 @@ pub const MAX_SEGMENTS_PER_MANIFEST: u32 = 1 << 20; // 1,048,576
 /// Maximum total payload bytes accepted for a single WAL record.
 pub const MAX_WAL_PAYLOAD_BYTES: u32 = 10 * 1024 * 1024;
 
+/// Aggregate WAL-replay buffer cap. `Engine.replayWal` reads every record
+/// into memory before applying it (so it can group by `txn_id` and drop
+/// uncommitted brackets). The per-record cap above bounds any single
+/// record, but a long-lived WAL with millions of small records could still
+/// exhaust memory. Cap the total accumulated payload at 10 GiB across the
+/// in-memory list; exceeding it surfaces `error.WalTooLarge` rather than
+/// letting the allocator OOM (SEC-EXT-0203).
+pub const MAX_WAL_REPLAY_AGGREGATE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
 /// Maximum term length (bytes) accepted from any source.
 pub const MAX_TERM_LEN: u32 = 1 << 14; // 16 KiB
 

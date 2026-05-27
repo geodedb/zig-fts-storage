@@ -186,15 +186,74 @@ pub const Engine = struct {
         // engine.segments before the next is attempted, so the errdefer
         // above will tear down whatever was loaded if a later segment
         // fails to open (WRK-022).
+        //
+        // SEC-EXT-0209: a single corrupt segment file must not block engine
+        // init — that would turn any storage-layer corruption (bit rot,
+        // truncated tail, partial write at crash) into a denial-of-
+        // service-on-restart. Rename the broken directory to
+        // `seg_<id>.corrupt` so an operator can inspect/recover it offline,
+        // log the failure, and proceed with the surviving segments. The
+        // manifest's segment list is not mutated here — a future flush will
+        // rewrite the manifest and quietly drop the orphaned entry, or the
+        // operator can repair the segment and restart.
+        //
+        // BUT: quarantine is intentionally gated by whether the caller has
+        // configured the AEAD key for this engine. With no key, a load
+        // failure could mean "segment was encrypted and caller forgot to
+        // pass the key" — silently quarantining in that case would destroy
+        // the user's data. Fail loud instead. Once `aead_key` is set, a
+        // load failure can only mean genuine corruption (the AEAD tag would
+        // catch wrong-key tampering), so quarantine is safe.
         try engine.segments.ensureTotalCapacity(allocator, engine.current_manifest.segments.items.len);
         for (engine.current_manifest.segments.items) |seg_entry| {
-            const seg_reader = try segment.SegmentReader.initWithAead(
+            const seg_reader = segment.SegmentReader.initWithAead(
                 io,
                 allocator,
                 engine.seg_dir,
                 seg_entry.id,
                 config.aead_key,
-            );
+            ) catch |err| {
+                // HMAC mismatch must NEVER be quarantined — wrong-key /
+                // tampering has to surface, not be silently walked past
+                // (SEC-02, SEC-EXT-0401, GAP-0027).
+                if (err == error.HmacMismatch) return err;
+
+                // Without AEAD configured, refuse to quarantine: the load
+                // failure is more likely a "you forgot to pass aead_key"
+                // configuration mistake than a corruption event. Preserve
+                // the pre-quarantine fail-loud behavior so the caller sees
+                // the original error.
+                if (config.aead_key == null) return err;
+
+                var name_buf: [40]u8 = undefined;
+                const old_name = std.fmt.bufPrint(&name_buf, "seg_{d}", .{seg_entry.id}) catch {
+                    std.log.warn(
+                        "fts-storage: segment {d} corrupt ({s}); rename failed (name fmt)",
+                        .{ seg_entry.id, @errorName(err) },
+                    );
+                    continue;
+                };
+                var bad_buf: [48]u8 = undefined;
+                const bad_name = std.fmt.bufPrint(&bad_buf, "seg_{d}.corrupt", .{seg_entry.id}) catch {
+                    std.log.warn(
+                        "fts-storage: segment {d} corrupt ({s}); rename failed (bad name fmt)",
+                        .{ seg_entry.id, @errorName(err) },
+                    );
+                    continue;
+                };
+                engine.seg_dir.rename(old_name, engine.seg_dir, bad_name, io) catch |rename_err| {
+                    std.log.warn(
+                        "fts-storage: segment {d} corrupt ({s}); rename to {s} failed ({s})",
+                        .{ seg_entry.id, @errorName(err), bad_name, @errorName(rename_err) },
+                    );
+                    continue;
+                };
+                std.log.warn(
+                    "fts-storage: segment {d} corrupt ({s}); quarantined to {s}",
+                    .{ seg_entry.id, @errorName(err), bad_name },
+                );
+                continue;
+            };
             engine.segments.appendAssumeCapacity(seg_reader);
         }
 
@@ -360,6 +419,16 @@ pub const Engine = struct {
             all.deinit(self.allocator);
         }
 
+        // SEC-EXT-0203: aggregate-payload cap. Each individual record is
+        // already bounded by `MAX_WAL_PAYLOAD_BYTES` (10 MiB) but a long WAL
+        // with millions of small records could still exhaust memory because
+        // every record is held in `all` until the second/third pass. Refuse
+        // to grow the in-memory buffer past `MAX_WAL_REPLAY_AGGREGATE_BYTES`
+        // — a WAL that large indicates either a runaway producer or
+        // adversarial input, both of which deserve a loud failure rather
+        // than an OOM.
+        var total_payload_bytes: u64 = 0;
+
         while (true) {
             const rec_opt = reader.next() catch |err| switch (err) {
                 error.Incomplete,
@@ -370,6 +439,14 @@ pub const Engine = struct {
                 else => return err,
             };
             const rec = rec_opt orelse break;
+            total_payload_bytes += @as(u64, rec.payload.len);
+            if (total_payload_bytes > limits.MAX_WAL_REPLAY_AGGREGATE_BYTES) {
+                // `rec` is not yet appended to `all`, so it would otherwise
+                // leak; defer-cleanup tears down `all` but not this orphan.
+                var rec_mut = rec;
+                rec_mut.deinit(self.allocator);
+                return error.WalTooLarge;
+            }
             try all.append(self.allocator, rec);
         }
 
