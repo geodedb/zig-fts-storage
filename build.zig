@@ -24,6 +24,25 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const tsan = b.option(bool, "tsan", "Enable ThreadSanitizer on test artifacts") orelse false;
+    // SEC-EXT-0605: -Dasan=true enables every memory-safety / UB sanitizer
+    // currently reachable through the Zig 0.16 Build API. AddressSanitizer
+    // itself is not yet exposed as a Module-level flag (no
+    // `Module.sanitize_address` field — only `sanitize_thread` and
+    // `sanitize_c`). What we can do on 0.16:
+    //
+    //   * Zig safety builds (Debug / ReleaseSafe) already cover bounds,
+    //     alignment, pointer-tag, and use-after-free-of-stack via the
+    //     language. The unit / integration / fault-injection tests run in
+    //     Debug by default, so those checks are always on.
+    //   * Setting `sanitize_c = .full` switches any C TU we pull in (none
+    //     today, but future ones) to UBSan with trap-on-undefined behaviour.
+    //   * `-Dtsan=true` already exists for the race-detection axis.
+    //
+    // Treat `-Dasan=true` as the umbrella "max-safety" knob until upstream
+    // Zig surfaces `sanitize_address` on Module. The CI `test-asan` job
+    // wires it through so we exercise this path on every default-branch run;
+    // promote to required once it has run clean for a release cycle.
+    const asan = b.option(bool, "asan", "Enable max-safety sanitizers on test artifacts (SEC-EXT-0605)") orelse false;
     const no_cli = b.option(bool, "no-cli", "Skip building the CLI executable (library-only build)") orelse false;
 
     // ------------------------------------------------------------------
@@ -89,6 +108,7 @@ pub fn build(b: *std.Build) void {
         .root_module = module,
     });
     if (tsan) unit_tests.root_module.sanitize_thread = true;
+    if (asan) unit_tests.root_module.sanitize_c = .full;
     unit_step.dependOn(&b.addRunArtifact(unit_tests).step);
 
     const integration_step = b.step("test-integration", "Run integration tests");
@@ -96,6 +116,7 @@ pub fn build(b: *std.Build) void {
         .root_module = importedModule(b, "tests/integration.zig", target, optimize, module),
     });
     if (tsan) integration_tests.root_module.sanitize_thread = true;
+    if (asan) integration_tests.root_module.sanitize_c = .full;
     integration_step.dependOn(&b.addRunArtifact(integration_tests).step);
 
     // Fault-injection harness (WRK-022, GAP-0016, QUAL-0020, QUAL-0021).
@@ -106,6 +127,7 @@ pub fn build(b: *std.Build) void {
         .root_module = importedModule(b, "tests/fault_injection.zig", target, optimize, module),
     });
     if (tsan) fault_tests.root_module.sanitize_thread = true;
+    if (asan) fault_tests.root_module.sanitize_c = .full;
     integration_step.dependOn(&b.addRunArtifact(fault_tests).step);
 
     // Stress runs Debug under TSan so races aren't optimised away.
@@ -115,6 +137,7 @@ pub fn build(b: *std.Build) void {
         .root_module = importedModule(b, "tests/stress.zig", target, stress_optimize, module),
     });
     if (tsan) stress_tests.root_module.sanitize_thread = true;
+    if (asan) stress_tests.root_module.sanitize_c = .full;
     stress_step.dependOn(&b.addRunArtifact(stress_tests).step);
 
     // Adversarial deserializer harness (SEC-EXT-0504). A small, deterministic
@@ -128,6 +151,7 @@ pub fn build(b: *std.Build) void {
         .root_module = importedModule(b, "tests/fuzz_targets.zig", target, optimize, module),
     });
     if (tsan) fuzz_tests.root_module.sanitize_thread = true;
+    if (asan) fuzz_tests.root_module.sanitize_c = .full;
     fuzz_step.dependOn(&b.addRunArtifact(fuzz_tests).step);
 
     const all_tests_step = b.step("test-all", "Run unit, integration, and stress suites");

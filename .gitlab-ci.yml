@@ -257,6 +257,21 @@ zig-test-windows-stress-0.16.0:
 - when: manual
   allow_failure: true
 
+# ---------------------------------------------------------------
+# Sanitizer build (SEC-EXT-0605). Re-runs unit + integration with
+# -Dasan=true so the max-safety toggle is exercised on every push.
+# Advisory while we wait for upstream Zig to expose
+# Module.sanitize_address; promote to a required gate once the
+# rest of the safety axis ships.
+# ---------------------------------------------------------------
+test-asan:
+  extends: .zig-host-base
+  stage: test
+  script:
+  - zig build test --summary all -Dasan=true
+  - zig build test-integration --summary all -Dasan=true
+  allow_failure: true
+
 benchmark-regression:
   extends: .zig-host-base
   stage: performance
