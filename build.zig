@@ -23,7 +23,7 @@ fn importedModule(
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const tsan = b.option(bool, "tsan", "Enable ThreadSanitizer on test artifacts") orelse false;
+    const tsan = b.option(bool, "tsan", "Enable ThreadSanitizer on test/stress/fuzz/integration artifacts (forces stress-suite optimize=Debug so races aren't optimised away)") orelse false;
     // SEC-EXT-0605: -Dasan=true enables every memory-safety / UB sanitizer
     // currently reachable through the Zig 0.16 Build API. AddressSanitizer
     // itself is not yet exposed as a Module-level flag (no
@@ -43,7 +43,7 @@ pub fn build(b: *std.Build) void {
     // wires it through so we exercise this path on every default-branch run;
     // promote to required once it has run clean for a release cycle.
     const asan = b.option(bool, "asan", "Enable max-safety sanitizers on test artifacts (SEC-EXT-0605)") orelse false;
-    const no_cli = b.option(bool, "no-cli", "Skip building the CLI executable (library-only build)") orelse false;
+    const no_cli = b.option(bool, "no-cli", "Skip building the CLI executable and the `run` step (library-only build for downstream consumers)") orelse false;
 
     // ------------------------------------------------------------------
     // Library module — primary public surface for downstream consumers.
