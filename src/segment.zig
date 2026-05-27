@@ -114,6 +114,11 @@ pub const SegmentWriter = struct {
     dir: std.Io.Dir,
     allocator: Allocator,
     segment_id: u64,
+    /// Optional AES-256-GCM key for at-rest segment encryption (WRK-038,
+    /// GAP-0009, SEC-EXT-0402). When non-null, each file's payload is
+    /// wrapped in `nonce(12) || ciphertext || tag(16)` before being written
+    /// to disk. Null preserves the pre-WRK-038 plaintext format.
+    aead_key: ?[]const u8 = null,
 
     pub fn writeMemtable(self: *SegmentWriter, memtable: *Memtable) !void {
         var seg_dir_name_buf: [64]u8 = undefined;
@@ -130,6 +135,22 @@ pub const SegmentWriter = struct {
         try self.writeDictionaryAndPostings(&seg_dir, memtable);
         try self.writeTombstones(&seg_dir, memtable);
         try self.writeNorms(&seg_dir, memtable);
+    }
+
+    /// Write `buf` to `seg_dir/name`, transparently AEAD-encrypting first
+    /// when `self.aead_key` is non-null (WRK-038). Pulled into a helper so
+    /// every file goes through the same envelope path.
+    fn writeFile(self: *SegmentWriter, seg_dir: *std.Io.Dir, name: []const u8, buf: []const u8) !void {
+        const file = try seg_dir.createFile(self.io, name, .{ .permissions = utils.fileMode(0o600) });
+        defer file.close(self.io);
+
+        if (self.aead_key) |key| {
+            const enc = try utils.aeadEncrypt(self.io, key, buf, self.allocator);
+            defer self.allocator.free(enc);
+            try file.writeStreamingAll(self.io, enc);
+        } else {
+            try file.writeStreamingAll(self.io, buf);
+        }
     }
 
     /// Per-doc length normalization data (norms.bin) for BM25 scoring
@@ -175,9 +196,7 @@ pub const SegmentWriter = struct {
             try norms_buf.appendSlice(self.allocator, num_buf[0..4]);
         }
 
-        const norms_file = try seg_dir.createFile(self.io, "norms.bin", .{ .permissions = utils.fileMode(0o600) });
-        defer norms_file.close(self.io);
-        try norms_file.writeStreamingAll(self.io, norms_buf.items);
+        try self.writeFile(seg_dir, "norms.bin", norms_buf.items);
     }
 
     fn writeDictionaryAndPostings(self: *SegmentWriter, seg_dir: *std.Io.Dir, memtable: *Memtable) !void {
@@ -247,32 +266,33 @@ pub const SegmentWriter = struct {
             try dict_buf.appendSlice(self.allocator, num_buf[0..8]);
         }
 
-        // Single writeStreamingAll per file (PERF-0004).
-        const dict_file = try seg_dir.createFile(self.io, "terms.hash", .{ .permissions = utils.fileMode(0o600) });
-        defer dict_file.close(self.io);
-        const post_file = try seg_dir.createFile(self.io, "postings.bin", .{ .permissions = utils.fileMode(0o600) });
-        defer post_file.close(self.io);
-
-        try dict_file.writeStreamingAll(self.io, dict_buf.items);
-        try post_file.writeStreamingAll(self.io, post_buf.items);
+        // Single writeStreamingAll per file (PERF-0004); each goes through
+        // writeFile so opt-in AEAD encryption (WRK-038) is applied uniformly.
+        try self.writeFile(seg_dir, "terms.hash", dict_buf.items);
+        try self.writeFile(seg_dir, "postings.bin", post_buf.items);
     }
 
     fn writeTombstones(self: *SegmentWriter, seg_dir: *std.Io.Dir, memtable: *Memtable) !void {
         if (memtable.tombstones.count() == 0) return;
 
-        const ts_file = try seg_dir.createFile(self.io, "tombstones.bin", .{ .permissions = utils.fileMode(0o600) });
-        defer ts_file.close(self.io);
+        // Buffer the entire tombstones payload before writing so opt-in AEAD
+        // encryption (WRK-038) has a single contiguous plaintext to encrypt.
+        // This also collapses N tiny syscalls into one writeStreamingAll
+        // (matches the PERF-0004 pattern used for terms/postings/norms).
+        var ts_buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer ts_buf.deinit(self.allocator);
 
         var num_buf: [8]u8 = undefined;
-
         std.mem.writeInt(u32, num_buf[0..4], @intCast(memtable.tombstones.count()), .little);
-        try ts_file.writeStreamingAll(self.io, num_buf[0..4]);
+        try ts_buf.appendSlice(self.allocator, num_buf[0..4]);
 
         var it = memtable.tombstones.keyIterator();
         while (it.next()) |doc_id| {
             std.mem.writeInt(u64, num_buf[0..8], doc_id.*, .little);
-            try ts_file.writeStreamingAll(self.io, num_buf[0..8]);
+            try ts_buf.appendSlice(self.allocator, num_buf[0..8]);
         }
+
+        try self.writeFile(seg_dir, "tombstones.bin", ts_buf.items);
     }
 };
 
@@ -297,6 +317,15 @@ pub const SegmentReader = struct {
     /// released in deinit.
     seg_dir: std.Io.Dir,
     postings_file: std.Io.File,
+    /// Optional AES-256-GCM key for at-rest decryption (WRK-038, GAP-0009,
+    /// SEC-EXT-0402). Null = plaintext segments (default).
+    aead_key: ?[]const u8 = null,
+    /// When `aead_key` is set, the *decrypted* postings.bin is materialized
+    /// in memory at init time and `search()` reads from this buffer instead
+    /// of `postings_file`. AEAD ciphertext is not random-accessible — the
+    /// tag covers the whole stream — so we cannot stream-decrypt by offset.
+    /// Null means "use postings_file" (the plaintext path).
+    postings_data: ?[]u8 = null,
 
     // Dictionary cached in memory for fast lookup
     pub const DictEntry = struct {
@@ -306,6 +335,16 @@ pub const SegmentReader = struct {
     };
 
     pub fn init(io: std.Io, allocator: Allocator, dir: std.Io.Dir, segment_id: u64) !SegmentReader {
+        return initWithAead(io, allocator, dir, segment_id, null);
+    }
+
+    pub fn initWithAead(
+        io: std.Io,
+        allocator: Allocator,
+        dir: std.Io.Dir,
+        segment_id: u64,
+        aead_key: ?[]const u8,
+    ) !SegmentReader {
         // Open the segment's own subdirectory once. We hold this for the
         // reader's lifetime so search() does not have to reopen it per query.
         var seg_dir_name_buf: [64]u8 = undefined;
@@ -328,6 +367,8 @@ pub const SegmentReader = struct {
             .norms = .empty,
             .seg_dir = seg_dir,
             .postings_file = postings_file,
+            .aead_key = aead_key,
+            .postings_data = null,
         };
         // If load() fails partway (corrupted terms.hash, truncated payload),
         // any dictionary entries / capacity already allocated must be torn
@@ -340,6 +381,7 @@ pub const SegmentReader = struct {
             seg.dictionary.deinit(allocator);
             seg.tombstones.deinit(allocator);
             seg.norms.deinit(allocator);
+            if (seg.postings_data) |pd| allocator.free(pd);
         }
         try seg.load();
         return seg;
@@ -355,6 +397,7 @@ pub const SegmentReader = struct {
         self.dictionary.deinit(self.allocator);
         self.tombstones.deinit(self.allocator);
         self.norms.deinit(self.allocator);
+        if (self.postings_data) |pd| self.allocator.free(pd);
     }
 
     pub const PostingIterator = struct {
@@ -414,14 +457,22 @@ pub const SegmentReader = struct {
             const data = try self.allocator.alloc(u8, postings_len_usize);
             errdefer self.allocator.free(data);
 
-            // Use the cached postings.bin handle opened in init (WRK-033) so
-            // we do not pay an openDir + openFile + close per query
-            // (PERF-0005, PERF-0007).
-            var index: usize = 0;
-            while (index < data.len) {
-                const amt = try self.postings_file.readPositional(self.io, &.{data[index..]}, entry.postings_offset + index);
-                if (amt == 0) return error.Incomplete;
-                index += amt;
+            if (self.postings_data) |pd| {
+                // Encrypted segment path (WRK-038, GAP-0009, SEC-EXT-0402):
+                // the entire decrypted postings.bin is in memory; just slice.
+                const offset_usize = std.math.cast(usize, entry.postings_offset) orelse return error.PostingsTooLarge;
+                if (offset_usize + postings_len_usize > pd.len) return error.Incomplete;
+                @memcpy(data, pd[offset_usize .. offset_usize + postings_len_usize]);
+            } else {
+                // Plaintext path: use the cached postings.bin handle opened
+                // in init (WRK-033) so we do not pay an openDir + openFile +
+                // close per query (PERF-0005, PERF-0007).
+                var index: usize = 0;
+                while (index < data.len) {
+                    const amt = try self.postings_file.readPositional(self.io, &.{data[index..]}, entry.postings_offset + index);
+                    if (amt == 0) return error.Incomplete;
+                    index += amt;
+                }
             }
 
             return PostingIterator{
@@ -461,31 +512,73 @@ pub const SegmentReader = struct {
         return std.mem.readInt(u64, &buf, .little);
     }
 
+    /// Read `name` from `seg_dir` into a fresh allocator-owned buffer,
+    /// transparently AEAD-decrypting when `self.aead_key` is set
+    /// (WRK-038, GAP-0009, SEC-EXT-0402). Returns null when the file does
+    /// not exist. SEC-EXT-0301: refuses to follow symlinks.
+    fn readSegmentFile(self: *SegmentReader, name: []const u8) !?[]u8 {
+        const file = self.seg_dir.openFile(self.io, name, .{ .follow_symlinks = false }) catch |err| {
+            if (err == error.FileNotFound) return null;
+            return err;
+        };
+        defer file.close(self.io);
+
+        const stat = try file.stat(self.io);
+        const size_usize = std.math.cast(usize, stat.size) orelse return error.PostingsTooLarge;
+
+        const raw = try self.allocator.alloc(u8, size_usize);
+        errdefer self.allocator.free(raw);
+
+        if (size_usize > 0) {
+            var index: usize = 0;
+            while (index < size_usize) {
+                const amt = try file.readPositional(self.io, &.{raw[index..]}, index);
+                if (amt == 0) return error.Incomplete;
+                index += amt;
+            }
+        }
+
+        if (self.aead_key) |key| {
+            defer self.allocator.free(raw);
+            return try utils.aeadDecrypt(key, raw, self.allocator);
+        }
+
+        return raw;
+    }
+
     fn load(self: *SegmentReader) !void {
         // Reuse the seg_dir handle opened in init rather than opening a new
         // one (WRK-033). The cached handle is also used by search().
+        //
+        // Each file is read into a contiguous buffer, optionally AEAD-
+        // decrypted (WRK-038), and then parsed in-memory. The plaintext
+        // path is byte-for-byte equivalent to the pre-WRK-038 streaming
+        // parser since `readSegmentFile` returns the same bytes that used
+        // to be streamed.
 
-        // Load dictionary — refuse to follow symlinks (SEC-EXT-0301).
-        if (self.seg_dir.openFile(self.io, "terms.hash", .{ .follow_symlinks = false })) |file| {
-            defer file.close(self.io);
-
-            const count = readU32FromFile(file, self.io) catch 0;
+        // Load dictionary.
+        if (try self.readSegmentFile("terms.hash")) |dict_buf| {
+            defer self.allocator.free(dict_buf);
+            var pos: usize = 0;
+            if (dict_buf.len < 4) return error.Incomplete;
+            const count = utils.readU32Le(dict_buf, &pos);
             if (count > limits.MAX_TERMS_PER_SEGMENT) return error.TermCountTooLarge;
             try self.dictionary.ensureTotalCapacity(self.allocator, count);
 
             var i: usize = 0;
             while (i < count) : (i += 1) {
-                const term_len = try readU16FromFile(file, self.io);
+                if (pos + 2 > dict_buf.len) return error.Incomplete;
+                const term_len = utils.readU16Le(dict_buf, &pos);
+                if (pos + term_len > dict_buf.len) return error.Incomplete;
                 const term = try self.allocator.alloc(u8, term_len);
                 errdefer self.allocator.free(term);
+                @memcpy(term, dict_buf[pos .. pos + term_len]);
+                pos += term_len;
 
-                var iov = [_][]u8{term};
-                const read = try file.readStreaming(self.io, &iov);
-                if (read < term_len) return error.Incomplete;
-
-                const df = try readU64FromFile(file, self.io);
-                const offset = try readU64FromFile(file, self.io);
-                const len = try readU64FromFile(file, self.io);
+                if (pos + 24 > dict_buf.len) return error.Incomplete;
+                const df = utils.readU64Le(dict_buf, &pos);
+                const offset = utils.readU64Le(dict_buf, &pos);
+                const len = utils.readU64Le(dict_buf, &pos);
 
                 self.dictionary.putAssumeCapacityNoClobber(term, .{
                     .df = df,
@@ -493,43 +586,51 @@ pub const SegmentReader = struct {
                     .postings_len = len,
                 });
             }
-        } else |err| {
-            if (err != error.FileNotFound) return err;
         }
 
-        // Load tombstones — refuse to follow symlinks (SEC-EXT-0301).
-        if (self.seg_dir.openFile(self.io, "tombstones.bin", .{ .follow_symlinks = false })) |file| {
-            defer file.close(self.io);
-            const count = readU32FromFile(file, self.io) catch 0;
+        // Load tombstones.
+        if (try self.readSegmentFile("tombstones.bin")) |ts_buf| {
+            defer self.allocator.free(ts_buf);
+            var pos: usize = 0;
+            if (ts_buf.len < 4) return error.Incomplete;
+            const count = utils.readU32Le(ts_buf, &pos);
             if (count > limits.MAX_TOMBSTONES_PER_SEGMENT) return error.TombstoneCountTooLarge;
             try self.tombstones.ensureTotalCapacity(self.allocator, count);
 
             var i: usize = 0;
             while (i < count) : (i += 1) {
-                const doc_id = try readU64FromFile(file, self.io);
+                if (pos + 8 > ts_buf.len) return error.Incomplete;
+                const doc_id = utils.readU64Le(ts_buf, &pos);
                 self.tombstones.putAssumeCapacityNoClobber(doc_id, {});
             }
-        } else |err| {
-            if (err != error.FileNotFound) return err;
         }
 
-        // Load per-doc length norms — refuse to follow symlinks
-        // (SEC-EXT-0301). Absence is fine: segments written before WRK-035
+        // Load per-doc length norms. Absence is fine: pre-WRK-035 segments
         // simply have no norms.bin, and BM25 falls back to DEFAULT_DOC_LEN.
-        if (self.seg_dir.openFile(self.io, "norms.bin", .{ .follow_symlinks = false })) |file| {
-            defer file.close(self.io);
-            const count = readU32FromFile(file, self.io) catch 0;
+        if (try self.readSegmentFile("norms.bin")) |norms_buf| {
+            defer self.allocator.free(norms_buf);
+            var pos: usize = 0;
+            if (norms_buf.len < 4) return error.Incomplete;
+            const count = utils.readU32Le(norms_buf, &pos);
             if (count > limits.MAX_NORMS_PER_SEGMENT) return error.NormCountTooLarge;
             try self.norms.ensureTotalCapacity(self.allocator, count);
 
             var i: usize = 0;
             while (i < count) : (i += 1) {
-                const doc_id = try readU64FromFile(file, self.io);
-                const length = try readU32FromFile(file, self.io);
+                if (pos + 12 > norms_buf.len) return error.Incomplete;
+                const doc_id = utils.readU64Le(norms_buf, &pos);
+                const length = utils.readU32Le(norms_buf, &pos);
                 self.norms.putAssumeCapacityNoClobber(doc_id, length);
             }
-        } else |err| {
-            if (err != error.FileNotFound) return err;
+        }
+
+        // When AEAD is enabled, the postings_file handle cannot be used for
+        // positional reads — the GCM tag covers the entire file so the
+        // ciphertext is not random-accessible. Pre-load and decrypt the
+        // whole file once at init; search() will read from this buffer.
+        if (self.aead_key != null) {
+            self.postings_data = (try self.readSegmentFile("postings.bin")) orelse
+                try self.allocator.alloc(u8, 0);
         }
     }
 };

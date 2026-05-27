@@ -188,7 +188,13 @@ pub const Engine = struct {
         // fails to open (WRK-022).
         try engine.segments.ensureTotalCapacity(allocator, engine.current_manifest.segments.items.len);
         for (engine.current_manifest.segments.items) |seg_entry| {
-            const seg_reader = try segment.SegmentReader.init(io, allocator, engine.seg_dir, seg_entry.id);
+            const seg_reader = try segment.SegmentReader.initWithAead(
+                io,
+                allocator,
+                engine.seg_dir,
+                seg_entry.id,
+                config.aead_key,
+            );
             engine.segments.appendAssumeCapacity(seg_reader);
         }
 
@@ -589,6 +595,7 @@ pub const Engine = struct {
             .dir = self.seg_dir,
             .allocator = self.allocator,
             .segment_id = next_segment_id,
+            .aead_key = self.aead_key,
         };
         try writer.writeMemtable(&self.memtable);
         errdefer if (!phase2_done) {
@@ -685,7 +692,13 @@ pub const Engine = struct {
         );
 
         // Open SegmentReader and add to segments list.
-        const seg_reader = try segment.SegmentReader.init(self.io, self.allocator, self.seg_dir, next_segment_id);
+        const seg_reader = try segment.SegmentReader.initWithAead(
+            self.io,
+            self.allocator,
+            self.seg_dir,
+            next_segment_id,
+            self.aead_key,
+        );
         try self.segments.append(self.allocator, seg_reader);
 
         // Clear memtable.
@@ -738,6 +751,7 @@ pub const Engine = struct {
             .dir = self.seg_dir,
             .allocator = self.allocator,
             .segment_id = new_segment_id,
+            .aead_key = self.aead_key,
         };
         try writer.writeMemtable(&merged_mt);
 
@@ -769,7 +783,13 @@ pub const Engine = struct {
         // Close old SegmentReaders, open the new merged one.
         for (self.segments.items) |*sr| sr.deinit();
         self.segments.clearRetainingCapacity();
-        const new_reader = try segment.SegmentReader.init(self.io, self.allocator, self.seg_dir, new_segment_id);
+        const new_reader = try segment.SegmentReader.initWithAead(
+            self.io,
+            self.allocator,
+            self.seg_dir,
+            new_segment_id,
+            self.aead_key,
+        );
         try self.segments.append(self.allocator, new_reader);
 
         // Delete old segment directories. Best-effort: failure to delete a
@@ -961,6 +981,51 @@ test "HMAC: WAL roundtrip with key" {
             .{ .hmac_key = "different-key-32-bytes-padding!!" },
         );
         try std.testing.expectError(error.HmacMismatch, result);
+    }
+}
+
+test "AES-GCM: segment encryption roundtrip" {
+    // WRK-038, GAP-0009, SEC-EXT-0402: opt-in AES-256-GCM segment-at-rest
+    // encryption. Same key roundtrips cleanly; absent key must fail to
+    // open a previously-encrypted segment.
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // Exactly 32 bytes = Aes256Gcm key length.
+    const key = "32-bytes-of-aes-gcm-key-PLEASE!!";
+    try std.testing.expectEqual(@as(usize, 32), key.len);
+
+    {
+        var eng = try Engine.initWithConfig(io, alloc, tmp_dir.dir, .{ .aead_key = key });
+        defer eng.deinit();
+        const t = TermPosting{ .term = "ciphertext", .positions = &[_]u32{1} };
+        try eng.indexDocument(1, &[_]TermPosting{t});
+        try eng.flush();
+    }
+
+    // Reopen with same key — succeeds, segment loads and search works.
+    {
+        var eng = try Engine.initWithConfig(io, alloc, tmp_dir.dir, .{ .aead_key = key });
+        defer eng.deinit();
+        try std.testing.expectEqual(@as(usize, 1), eng.segments.items.len);
+
+        // Confirm the encrypted postings are actually queryable.
+        const search = @import("search.zig");
+        var iter = try search.TermIterator.init(alloc, eng, "ciphertext");
+        defer iter.deinit();
+        const m = (try iter.next()).?;
+        try std.testing.expectEqual(@as(u64, 1), m.doc_id);
+    }
+
+    // Reopen with NO key — must fail. The exact error depends on which
+    // path detects the mismatch first: AEAD tag verification fails with
+    // AuthenticationFailed, but the size/count check in the dictionary
+    // parser may trip first with InvalidData or Incomplete.
+    {
+        const result = Engine.initWithConfig(io, alloc, tmp_dir.dir, .{});
+        try std.testing.expect(std.meta.isError(result));
     }
 }
 

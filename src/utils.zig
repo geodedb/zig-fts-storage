@@ -112,6 +112,82 @@ pub fn hashCrc32c(data: []const u8) u32 {
     return std.hash.crc.Crc32Iscsi.hash(data);
 }
 
+// ============================================================================
+// AES-256-GCM helpers for opt-in segment-at-rest encryption (WRK-038,
+// GAP-0009, SEC-EXT-0402).
+//
+// Wire format produced by `aeadEncrypt`:
+//   nonce(12) || ciphertext(plaintext.len) || tag(16)
+// Total overhead per encrypted file is 28 bytes. Each call generates a fresh
+// random nonce from the engine's `std.Io.random` source — never reuse a
+// nonce with the same key.
+// ============================================================================
+
+pub const AEAD_NONCE_LEN: usize = std.crypto.aead.aes_gcm.Aes256Gcm.nonce_length;
+pub const AEAD_TAG_LEN: usize = std.crypto.aead.aes_gcm.Aes256Gcm.tag_length;
+pub const AEAD_KEY_LEN: usize = std.crypto.aead.aes_gcm.Aes256Gcm.key_length;
+pub const AEAD_OVERHEAD: usize = AEAD_NONCE_LEN + AEAD_TAG_LEN;
+
+pub fn aeadEncrypt(
+    io: std.Io,
+    key: []const u8,
+    plaintext: []const u8,
+    allocator: std.mem.Allocator,
+) ![]u8 {
+    if (key.len != AEAD_KEY_LEN) return error.InvalidKey;
+    const Aes = std.crypto.aead.aes_gcm.Aes256Gcm;
+
+    var nonce: [AEAD_NONCE_LEN]u8 = undefined;
+    io.random(&nonce);
+
+    const out = try allocator.alloc(u8, AEAD_NONCE_LEN + plaintext.len + AEAD_TAG_LEN);
+    errdefer allocator.free(out);
+
+    @memcpy(out[0..AEAD_NONCE_LEN], &nonce);
+
+    var tag: [AEAD_TAG_LEN]u8 = undefined;
+    var key_arr: [AEAD_KEY_LEN]u8 = undefined;
+    @memcpy(&key_arr, key[0..AEAD_KEY_LEN]);
+    Aes.encrypt(
+        out[AEAD_NONCE_LEN .. AEAD_NONCE_LEN + plaintext.len],
+        &tag,
+        plaintext,
+        "",
+        nonce,
+        key_arr,
+    );
+    @memcpy(out[AEAD_NONCE_LEN + plaintext.len ..], &tag);
+    return out;
+}
+
+pub fn aeadDecrypt(
+    key: []const u8,
+    ciphertext: []const u8,
+    allocator: std.mem.Allocator,
+) ![]u8 {
+    if (key.len != AEAD_KEY_LEN) return error.InvalidKey;
+    if (ciphertext.len < AEAD_OVERHEAD) return error.CiphertextTooShort;
+    const Aes = std.crypto.aead.aes_gcm.Aes256Gcm;
+
+    var nonce: [AEAD_NONCE_LEN]u8 = undefined;
+    @memcpy(&nonce, ciphertext[0..AEAD_NONCE_LEN]);
+
+    const tag_off = ciphertext.len - AEAD_TAG_LEN;
+    const ct = ciphertext[AEAD_NONCE_LEN..tag_off];
+
+    var tag: [AEAD_TAG_LEN]u8 = undefined;
+    @memcpy(&tag, ciphertext[tag_off..]);
+
+    var key_arr: [AEAD_KEY_LEN]u8 = undefined;
+    @memcpy(&key_arr, key[0..AEAD_KEY_LEN]);
+
+    const out = try allocator.alloc(u8, ct.len);
+    errdefer allocator.free(out);
+
+    try Aes.decrypt(out, ct, tag, "", nonce, key_arr);
+    return out;
+}
+
 /// Performs an atomic file swap by writing to a temp file, fsyncing, and renaming.
 ///
 /// Hardening (QUAL-0010, PERF-0013, SEC-EXT-0303):
