@@ -319,7 +319,10 @@ pub const SegmentReader = struct {
             var seg_dir = try self.dir.openDir(self.io, seg_dir_name, .{});
             defer seg_dir.close(self.io);
 
-            const file = try seg_dir.openFile(self.io, "postings.bin", .{});
+            // SEC-EXT-0301: O_NOFOLLOW — segment files are owner-only-perms;
+            // refuse to follow symlinks so a malicious actor with write
+            // access to the segments tree cannot redirect reads.
+            const file = try seg_dir.openFile(self.io, "postings.bin", .{ .follow_symlinks = false });
             defer file.close(self.io);
 
             var index: usize = 0;
@@ -372,8 +375,8 @@ pub const SegmentReader = struct {
         var seg_dir = try self.dir.openDir(self.io, seg_dir_name, .{});
         defer seg_dir.close(self.io);
 
-        // Load dictionary
-        if (seg_dir.openFile(self.io, "terms.hash", .{})) |file| {
+        // Load dictionary — refuse to follow symlinks (SEC-EXT-0301).
+        if (seg_dir.openFile(self.io, "terms.hash", .{ .follow_symlinks = false })) |file| {
             defer file.close(self.io);
 
             const count = readU32FromFile(file, self.io) catch 0;
@@ -404,8 +407,8 @@ pub const SegmentReader = struct {
             if (err != error.FileNotFound) return err;
         }
 
-        // Load tombstones
-        if (seg_dir.openFile(self.io, "tombstones.bin", .{})) |file| {
+        // Load tombstones — refuse to follow symlinks (SEC-EXT-0301).
+        if (seg_dir.openFile(self.io, "tombstones.bin", .{ .follow_symlinks = false })) |file| {
             defer file.close(self.io);
             const count = readU32FromFile(file, self.io) catch 0;
             if (count > limits.MAX_TOMBSTONES_PER_SEGMENT) return error.TombstoneCountTooLarge;

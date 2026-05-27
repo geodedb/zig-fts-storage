@@ -38,6 +38,16 @@ pub const Engine = struct {
     /// (and close on deinit) the `wal/` and `segments/` subdirs of `base_dir`,
     /// but will NOT close `base_dir` itself. The caller must `base_dir.close(io)`
     /// after `Engine.deinit`.
+    ///
+    /// SECURITY (SEC-EXT-0301): the caller MUST ensure `base_dir` and its
+    /// `wal/` and `segments/` subtrees are not writable by adversaries.
+    /// Reads pass `follow_symlinks = false` so a symlink swap on an existing
+    /// file is rejected, but Zig 0.16's `std.Io.Dir.CreateFileOptions` does
+    /// not expose an O_NOFOLLOW equivalent — so a pre-positioned symlink at
+    /// a path the engine will *create* (`manifest.{a,b}.tmp`, `fts.wal`,
+    /// `segments/seg_*/...`) would be followed. The owner-only `0o700` dir
+    /// permissions on `wal/` and `segments/` mitigate the local-user case,
+    /// but the parent `base_dir` is the caller's responsibility.
     pub fn init(io: std.Io, allocator: Allocator, base_dir: std.Io.Dir) !*Engine {
         var engine = try allocator.create(Engine);
         errdefer allocator.destroy(engine);
@@ -127,7 +137,10 @@ pub const Engine = struct {
     }
 
     fn loadManifest(io: std.Io, allocator: Allocator, dir: std.Io.Dir, path: []const u8) !manifest.Manifest {
-        const file = try dir.openFile(io, path, .{});
+        // SEC-EXT-0301: refuse to follow symlinks so an adversary with
+        // directory write access cannot redirect manifest reads at a sensitive
+        // file (e.g. swap manifest.a for a symlink to /etc/passwd).
+        const file = try dir.openFile(io, path, .{ .follow_symlinks = false });
         defer file.close(io);
         const stat = try file.stat(io);
         if (stat.size > limits.MAX_MANIFEST_BYTES) return error.ManifestTooLarge;
@@ -163,7 +176,10 @@ pub const Engine = struct {
     }
 
     fn replayWal(self: *Engine) !void {
-        const file = self.wal_dir.openFile(self.io, "fts.wal", .{}) catch |err| {
+        // SEC-EXT-0301: O_NOFOLLOW on the WAL — an attacker with write access
+        // to the wal/ directory must not be able to redirect replay through a
+        // symlink.
+        const file = self.wal_dir.openFile(self.io, "fts.wal", .{ .follow_symlinks = false }) catch |err| {
             if (err == error.FileNotFound) return;
             return err;
         };
