@@ -493,7 +493,13 @@ pub const SegmentReader = struct {
 
     pub const PostingIterator = struct {
         allocator: Allocator,
-        data: []u8,
+        data: []const u8,
+        /// True when the iterator owns `data` and must free it on deinit.
+        /// False when `data` is a borrowed slice into the parent reader's
+        /// `postings_data` buffer (encrypted-segment fast path — PERF rank
+        /// 9, AEAD branch). Borrowing skips one alloc + memcpy of the full
+        /// postings span per (term, segment) query when AEAD is enabled.
+        owns_data: bool,
         df: u64,
         current_idx: u64,
         pos: usize,
@@ -506,7 +512,9 @@ pub const SegmentReader = struct {
         };
 
         pub fn deinit(self: *PostingIterator) void {
-            self.allocator.free(self.data);
+            if (self.owns_data) {
+                self.allocator.free(@constCast(self.data));
+            }
             self.pos_buf.deinit(self.allocator);
         }
 
@@ -592,30 +600,45 @@ pub const SegmentReader = struct {
             // construction and is deferred (TermIterator-level cap).
             if (entry.postings_len > limits.MAX_POSTINGS_BYTES_PER_QUERY) return error.PostingsTooLarge;
             const postings_len_usize = std.math.cast(usize, entry.postings_len) orelse return error.PostingsTooLarge;
-            const data = try self.allocator.alloc(u8, postings_len_usize);
-            errdefer self.allocator.free(data);
 
             if (self.postings_data) |pd| {
-                // Encrypted segment path (WRK-038, GAP-0009, SEC-EXT-0402):
-                // the entire decrypted postings.bin is in memory; just slice.
+                // Encrypted segment fast path (WRK-038, GAP-0009, SEC-EXT-0402).
+                // PERF rank 9: the entire decrypted postings.bin is already
+                // resident; return a borrowed slice instead of allocating +
+                // memcpy'ing a private copy per (term, segment) call. Saves
+                // one alloc + one memcpy of `postings_len_usize` bytes per
+                // query when AEAD is enabled.
                 const offset_usize = std.math.cast(usize, entry.postings_offset) orelse return error.PostingsTooLarge;
                 if (offset_usize + postings_len_usize > pd.len) return error.Incomplete;
-                @memcpy(data, pd[offset_usize .. offset_usize + postings_len_usize]);
-            } else {
-                // Plaintext path: use the cached postings.bin handle opened
-                // in init (WRK-033) so we do not pay an openDir + openFile +
-                // close per query (PERF-0005, PERF-0007).
-                var index: usize = 0;
-                while (index < data.len) {
-                    const amt = try self.postings_file.readPositional(self.io, &.{data[index..]}, entry.postings_offset + index);
-                    if (amt == 0) return error.Incomplete;
-                    index += amt;
-                }
+                return PostingIterator{
+                    .allocator = self.allocator,
+                    .data = pd[offset_usize .. offset_usize + postings_len_usize],
+                    .owns_data = false,
+                    .df = entry.df,
+                    .current_idx = 0,
+                    .pos = 0,
+                    .last_doc_id = 0,
+                    .pos_buf = .empty,
+                };
+            }
+
+            // Plaintext path: use the cached postings.bin handle opened in
+            // init (WRK-033) so we do not pay an openDir + openFile + close
+            // per query (PERF-0005, PERF-0007). The buffer is owned by the
+            // iterator because postings.bin is not memory-resident.
+            const owned_data = try self.allocator.alloc(u8, postings_len_usize);
+            errdefer self.allocator.free(owned_data);
+            var index: usize = 0;
+            while (index < owned_data.len) {
+                const amt = try self.postings_file.readPositional(self.io, &.{owned_data[index..]}, entry.postings_offset + index);
+                if (amt == 0) return error.Incomplete;
+                index += amt;
             }
 
             return PostingIterator{
                 .allocator = self.allocator,
-                .data = data,
+                .data = owned_data,
+                .owns_data = true,
                 .df = entry.df,
                 .current_idx = 0,
                 .pos = 0,

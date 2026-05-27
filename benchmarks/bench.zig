@@ -395,6 +395,7 @@ fn benchPostingIterNextWithPositions(ctx: *framework.Context) anyerror!void {
     var it = fts.segment.SegmentReader.PostingIterator{
         .allocator = ctx.allocator,
         .data = data,
+        .owns_data = true,
         .df = POSTING_ENTRIES,
         .current_idx = 0,
         .pos = 0,
@@ -423,6 +424,7 @@ fn benchPostingIterNextDocOnly(ctx: *framework.Context) anyerror!void {
     var it = fts.segment.SegmentReader.PostingIterator{
         .allocator = ctx.allocator,
         .data = data,
+        .owns_data = true,
         .df = POSTING_ENTRIES,
         .current_idx = 0,
         .pos = 0,
