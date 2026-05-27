@@ -76,7 +76,12 @@ pub const Engine = struct {
 
     wal_file: std.Io.File,
     wal_writer: wal.WalWriter,
-    next_txn_id: u64 = 1,
+    /// Atomic transaction counter. Phase B1 of the concurrency-model
+    /// decision (PERF-0027, see `docs/concurrency-model-decision.md`).
+    /// `fetchAdd(1, .monotonic)` is enough — every caller needs a unique
+    /// id but no happens-before relationship with anything else; the WAL
+    /// append that follows provides the durability boundary.
+    next_txn_id: std.atomic.Value(u64) = .{ .raw = 1 },
 
     /// Optional HMAC-SHA256 key for WAL + manifest envelopes (SEC-02,
     /// SEC-EXT-0401, GAP-0027). Null = unchanged on-disk format. Caller owns
@@ -296,7 +301,7 @@ pub const Engine = struct {
             engine.segments.appendAssumeCapacity(seg_reader);
         }
 
-        engine.next_txn_id = engine.current_manifest.last_checkpoint_lsn + 1;
+        engine.next_txn_id.store(engine.current_manifest.last_checkpoint_lsn + 1, .monotonic);
 
         // Replay WAL
         try engine.replayWal();
@@ -544,7 +549,12 @@ pub const Engine = struct {
         for (all.items) |r| {
             if (r.txn_id <= self.current_manifest.last_checkpoint_lsn) continue;
             if (!committed.contains(r.txn_id)) continue;
-            if (r.txn_id >= self.next_txn_id) self.next_txn_id = r.txn_id + 1;
+            // Replay runs single-threaded inside init, so a plain
+            // load+store is safe; use atomic accessors for consistency
+            // with the rest of the engine (Phase B1).
+            if (r.txn_id >= self.next_txn_id.load(.monotonic)) {
+                self.next_txn_id.store(r.txn_id + 1, .monotonic);
+            }
             switch (r.record_type) {
                 .index_doc => try self.applyIndexDocPayload(r.doc_id, r.payload, &pos_buf),
                 .delete_doc => try self.memtable.addTombstone(r.doc_id),
@@ -638,7 +648,11 @@ pub const Engine = struct {
             }
         }
 
-        const txn_id = self.next_txn_id;
+        // Atomic claim of the next txn_id. fetchAdd returns the pre-add value,
+        // which is the one this caller owns. .monotonic is sufficient: the
+        // subsequent WAL append + sync provides the release boundary; no
+        // other engine state ordering depends on this counter (Phase B1).
+        const txn_id = self.next_txn_id.fetchAdd(1, .monotonic);
 
         // Serialize payload first; no memtable mutation yet.
         var payload_list: std.ArrayListUnmanaged(u8) = .empty;
@@ -707,12 +721,16 @@ pub const Engine = struct {
         try self.wal_writer.append(commit_rec);
         try self.wal_writer.sync();
 
-        // Only mutate memtable after WAL is durable. Bump next_txn_id last so
-        // a partial failure does not consume a txn id.
+        // Only mutate memtable after WAL is durable. Note the txn_id was
+        // already atomically claimed at the top of this function via
+        // fetchAdd, so even though we now know the txn was durable, the
+        // increment has already happened. A partial failure between
+        // fetchAdd and the memtable mutation skips a txn id — this is
+        // tolerated (WAL replay only applies records bracketed by a
+        // matching COMMIT, so a gap in the txn_id sequence is harmless).
         for (terms) |t| {
             try self.memtable.addPosting(t.term, doc_id, t.positions);
         }
-        self.next_txn_id += 1;
 
         // Auto-flush so memtable memory is bounded regardless of caller
         // behavior (SEC-EXT-0702). The threshold is currently a compile-time
@@ -724,8 +742,8 @@ pub const Engine = struct {
 
     pub fn deleteDocument(self: *Engine, doc_id: u64) !void {
         self.assertOwnedByCurrentThread();
-        const txn_id = self.next_txn_id;
-        self.next_txn_id += 1;
+        // Atomic claim (Phase B1).
+        const txn_id = self.next_txn_id.fetchAdd(1, .monotonic);
 
         try self.memtable.addTombstone(doc_id);
         // Mirror into the engine-wide aggregated set so isDeleted is O(1)
@@ -816,7 +834,7 @@ pub const Engine = struct {
             .id = next_segment_id,
             .doc_count = self.memtable.total_docs,
             .tombstone_count = self.memtable.tombstones.count(),
-            .created_lsn = self.next_txn_id - 1,
+            .created_lsn = self.next_txn_id.load(.monotonic) - 1,
             .level = 0,
         });
         errdefer if (!phase2_done) {
@@ -845,7 +863,7 @@ pub const Engine = struct {
 
         self.current_manifest.total_docs += self.memtable.total_docs;
         self.current_manifest.counter += 1;
-        self.current_manifest.last_checkpoint_lsn = self.next_txn_id - 1;
+        self.current_manifest.last_checkpoint_lsn = self.next_txn_id.load(.monotonic) - 1;
 
         // Rolling, length-weighted average: prev_total_len = old_avg * old_doc_count,
         // new_avg = (prev_total_len + this_seg_total_len) / new_doc_count.
@@ -981,7 +999,7 @@ pub const Engine = struct {
             .id = new_segment_id,
             .doc_count = merged_mt.total_docs,
             .tombstone_count = 0,
-            .created_lsn = self.next_txn_id - 1,
+            .created_lsn = self.next_txn_id.load(.monotonic) - 1,
             .level = 1,
         });
         self.current_manifest.counter += 1;
