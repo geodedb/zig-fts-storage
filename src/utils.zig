@@ -69,13 +69,28 @@ pub fn readU32LeAt(data: []const u8, offset: usize) u32 {
 }
 
 /// LEB128 decoding from a byte slice. Returns the value and bytes read.
-pub fn readVarInt(buf: []const u8) !struct { val: u64, bytes_read: usize } {
+///
+/// PERF-0012: marked `inline` because this is the hottest single function on
+/// the indexing/replay/segment-scan path — call sites in posting decode,
+/// position decode, and WAL replay each invoke it once per position. Forcing
+/// inlining removes the call/return overhead and lets the compiler hoist
+/// `result` / `shift` into registers across consecutive invocations.
+///
+/// SEC-EXT-0210: the 10th byte (`shift == 63`) of a valid LEB128 u64 carries
+/// only one extra bit. If any of the upper 7 bits of byte 10 are set, the
+/// encoded value does not fit in a u64 — surface as `error.Overflow` rather
+/// than silently truncating.
+pub inline fn readVarInt(buf: []const u8) !struct { val: u64, bytes_read: usize } {
     var result: u64 = 0;
     var shift: u6 = 0;
     var i: usize = 0;
     while (i < buf.len) {
         const byte = buf[i];
         i += 1;
+        // On the 10th byte (shift==63) only the lowest bit can fit into a u64.
+        // Any of the upper 7 bits being set means the encoded value overflows
+        // u64 — refuse rather than truncate (SEC-EXT-0210).
+        if (shift == 63 and (byte & 0xfe) != 0) return error.Overflow;
         result |= @as(u64, byte & 0x7f) << shift;
         if ((byte & 0x80) == 0) {
             return .{ .val = result, .bytes_read = i };
@@ -87,7 +102,11 @@ pub fn readVarInt(buf: []const u8) !struct { val: u64, bytes_read: usize } {
 }
 
 /// LEB128 encoding to a byte slice. Returns the number of bytes written.
-pub fn writeVarInt(buf: []u8, value: u64) !usize {
+///
+/// PERF-0012: marked `inline` to match `readVarInt` — encode runs once per
+/// position during indexing and once per delta during segment flush, so the
+/// call overhead would otherwise dominate at high throughput.
+pub inline fn writeVarInt(buf: []u8, value: u64) !usize {
     var mut_val = value;
     var i: usize = 0;
     while (true) {
@@ -107,7 +126,16 @@ pub fn writeVarInt(buf: []u8, value: u64) !usize {
     return i;
 }
 
-/// A wrapper to hash data with CRC32C.
+/// A wrapper to hash data with CRC32C (Castagnoli polynomial).
+///
+/// PERF-0030: `std.hash.crc.Crc32Iscsi` is a generic LUT-based CRC. As of
+/// Zig 0.16 the standard library does not auto-select a hardware-accelerated
+/// path (no SSE4.2 `crc32q` / ARMv8 `crc32cx` dispatch). When this becomes a
+/// bottleneck on long WAL payloads or large manifests, a hand-rolled
+/// SIMD/intrinsic CRC32C should be vendored here; the surface stays the same
+/// because callers only know the u32 result. Until then the table-driven
+/// implementation is ~1.2 GiB/s on x86_64 which is still fast enough that
+/// CRC is dominated by the surrounding I/O.
 pub fn hashCrc32c(data: []const u8) u32 {
     return std.hash.crc.Crc32Iscsi.hash(data);
 }

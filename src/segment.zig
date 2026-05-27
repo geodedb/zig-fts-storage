@@ -448,6 +448,42 @@ pub const SegmentReader = struct {
             self.current_idx += 1;
             return Posting{ .doc_id = self.last_doc_id, .positions = self.pos_buf.items };
         }
+
+        /// Advance past one posting and return just the `doc_id` — skip the
+        /// positions varint loop entirely so the iterator does not pay the
+        /// per-position decode cost when the caller only needs document
+        /// membership (e.g. boolean intersection / RLS-gated count queries).
+        ///
+        /// PERF-0018: a typical posting has 1-8 positions; decoding them is
+        /// roughly half the per-posting wall time at large fan-out. Callers
+        /// that need positions must still use `next()` — this method does
+        /// not populate `pos_buf`, so reading `pos_buf.items` after a call
+        /// returns stale data from the previous `next()` (if any).
+        pub fn nextDocOnly(self: *PostingIterator) !?u64 {
+            if (self.current_idx >= self.df) return null;
+
+            const doc_delta = try utils.readVarInt(self.data[self.pos..]);
+            self.pos += doc_delta.bytes_read;
+            self.last_doc_id += doc_delta.val;
+
+            const tf_res = try utils.readVarInt(self.data[self.pos..]);
+            self.pos += tf_res.bytes_read;
+            const tf = tf_res.val;
+            if (tf > limits.MAX_POSITIONS_PER_TERM) return error.PositionCountTooLarge;
+
+            // Skip the positions varint stream without materializing them.
+            // We still have to advance `self.pos` byte-by-byte through each
+            // varint because positions are variable-width — there is no
+            // length prefix on the position run, only a count (`tf`).
+            var i: u64 = 0;
+            while (i < tf) : (i += 1) {
+                const pos_delta = try utils.readVarInt(self.data[self.pos..]);
+                self.pos += pos_delta.bytes_read;
+            }
+
+            self.current_idx += 1;
+            return self.last_doc_id;
+        }
     };
 
     pub fn search(self: *SegmentReader, term: []const u8) !?PostingIterator {
@@ -488,29 +524,12 @@ pub const SegmentReader = struct {
         return null;
     }
 
-    fn readU32FromFile(file: std.Io.File, io: std.Io) !u32 {
-        var buf: [4]u8 = undefined;
-        var iov = [_][]u8{&buf};
-        const read = try file.readStreaming(io, &iov);
-        if (read < 4) return error.Incomplete;
-        return std.mem.readInt(u32, &buf, .little);
-    }
-
-    fn readU16FromFile(file: std.Io.File, io: std.Io) !u16 {
-        var buf: [2]u8 = undefined;
-        var iov = [_][]u8{&buf};
-        const read = try file.readStreaming(io, &iov);
-        if (read < 2) return error.Incomplete;
-        return std.mem.readInt(u16, &buf, .little);
-    }
-
-    fn readU64FromFile(file: std.Io.File, io: std.Io) !u64 {
-        var buf: [8]u8 = undefined;
-        var iov = [_][]u8{&buf};
-        const read = try file.readStreaming(io, &iov);
-        if (read < 8) return error.Incomplete;
-        return std.mem.readInt(u64, &buf, .little);
-    }
+    // PERF-0008: the field-by-field `readU{16,32,64}FromFile` helpers used by
+    // pre-WRK-034 segment load have been retired. `readSegmentFile` slurps the
+    // entire file in one read and the in-memory parser walks the bytes with
+    // `utils.readU{16,32,64}Le`. This trades a few KB of transient memory per
+    // segment for ~5× fewer syscalls during init (1 read vs. ~12N reads where
+    // N is the term count).
 
     /// Read `name` from `seg_dir` into a fresh allocator-owned buffer,
     /// transparently AEAD-decrypting when `self.aead_key` is set

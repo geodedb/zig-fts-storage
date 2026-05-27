@@ -382,6 +382,18 @@ pub const Engine = struct {
             }
         }
 
+        // PERF-0015 / PERF-0029: hoist the per-position scratch buffer up to
+        // replayWal so it is allocated once across every replayed index_doc
+        // record. Pre-WRK-044 each `applyIndexDocPayload` call freshly
+        // allocated this list and tore it down at function exit; with N
+        // records that meant 2N allocations on the hot recovery path.
+        // `clearRetainingCapacity()` inside the callee gives us the same
+        // semantic guarantee (each record starts with a clean buffer) at zero
+        // ongoing allocation cost after the first record's positions are
+        // sized.
+        var pos_buf: std.ArrayListUnmanaged(u32) = .empty;
+        defer pos_buf.deinit(self.allocator);
+
         // Third pass: apply payload records whose txn was committed and
         // sits past the checkpoint. begin/commit themselves contribute no
         // payload to apply.
@@ -390,17 +402,20 @@ pub const Engine = struct {
             if (!committed.contains(r.txn_id)) continue;
             if (r.txn_id >= self.next_txn_id) self.next_txn_id = r.txn_id + 1;
             switch (r.record_type) {
-                .index_doc => try self.applyIndexDocPayload(r.doc_id, r.payload),
+                .index_doc => try self.applyIndexDocPayload(r.doc_id, r.payload, &pos_buf),
                 .delete_doc => try self.memtable.addTombstone(r.doc_id),
                 else => {},
             }
         }
     }
 
-    fn applyIndexDocPayload(self: *Engine, doc_id: u64, payload: []const u8) !void {
+    fn applyIndexDocPayload(
+        self: *Engine,
+        doc_id: u64,
+        payload: []const u8,
+        pos_buf: *std.ArrayListUnmanaged(u32),
+    ) !void {
         var pos: usize = 0;
-        var pos_buf: std.ArrayListUnmanaged(u32) = .empty;
-        defer pos_buf.deinit(self.allocator);
 
         while (pos < payload.len) {
             // Read term length
@@ -482,6 +497,18 @@ pub const Engine = struct {
         // Serialize payload first; no memtable mutation yet.
         var payload_list: std.ArrayListUnmanaged(u8) = .empty;
         defer payload_list.deinit(self.allocator);
+
+        // PERF-0011: pre-size the payload buffer with an upper-bound estimate
+        // so the inner loop never reallocates. Each term contributes
+        //   2 (term_len) + term.len + 2 (num_pos) + positions.len * 5
+        // where 5 is the worst-case varint width for a u32 position. This is
+        // an upper bound; the actual encoded size is typically smaller because
+        // positions encode in 1-2 varint bytes.
+        var estimated: usize = 0;
+        for (terms) |t| {
+            estimated += 4 + t.term.len + (t.positions.len * 5);
+        }
+        try payload_list.ensureTotalCapacity(self.allocator, estimated);
 
         var num_buf: [4]u8 = undefined;
         for (terms) |t| {
