@@ -5,9 +5,10 @@ thread-ownership check.**
 
 ## What this document records
 
-Three perf findings (PERF-0001, PERF-0010, PERF-0027) and a security finding
-(SEC-EXT-0701) all depend on whether `fts-storage` adopts a multi-threaded
-engine model. Until that decision is made, these items remain Won't-Do.
+Five perf findings (PERF-0001, PERF-0003, PERF-0009, PERF-0010, PERF-0027) and
+a security finding (SEC-EXT-0701) all depend on whether `fts-storage` adopts a
+multi-threaded engine model. Until that decision is made, these items remain
+Won't-Do.
 
 ## Why not just implement multi-threaded now
 
@@ -21,6 +22,16 @@ engine model. Until that decision is made, these items remain Won't-Do.
   avoid deadlock between flush threads and indexer threads.
 - True WAL group commit (PERF-0001) requires the writer-thread /
   coalescing-buffer pattern that depends on the concurrency model.
+- Arena-backed memtable (PERF-0003) only delivers its full alloc-churn /
+  bulk-free win when paired with the double-buffered memtable required by
+  PERF-0010, so writers can keep ingesting against arena #2 while arena #1
+  drains during background flush. Doing it standalone risks a second
+  rewrite once concurrency lands.
+- Synchronising engine state (PERF-0009) is the umbrella decision — every
+  one of the items above pins to it. The current contract is
+  "single-threaded, asserted in debug builds via
+  `Engine.assertOwnedByCurrentThread`"; multi-threaded callers must
+  serialize externally.
 
 ## What's currently true
 
@@ -32,11 +43,11 @@ engine model. Until that decision is made, these items remain Won't-Do.
 
 ## When this gets resolved
 
-When the project commits to a concurrency model, this doc and the four
+When the project commits to a concurrency model, this doc and the six
 Won't-Do items get reopened and re-planned. Until then they remain
 explicitly out-of-scope.
 
 ## Related
 
 - `docs/SECURITY_GAP_ANALYSIS.md` (SEC-EXT-0701)
-- `docs/PERF_GAP_ANALYSIS.md` (PERF-0001, PERF-0010, PERF-0027)
+- `docs/PERF_GAP_ANALYSIS.md` (PERF-0001, PERF-0003, PERF-0009, PERF-0010, PERF-0027)

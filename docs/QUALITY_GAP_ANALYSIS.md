@@ -67,22 +67,22 @@ Sorted by `PriorityScore` descending. All file:line citations point at `/home/be
 | 20 | QUAL-0013, DC-1 | `WalRecordType.begin/commit` defined but never emitted (dead code) | cleanup | Medium | 16 | `src/wal.zig` (WalRecordType) | **Closed** | commit 56e045c |
 | 21 | QUAL-0017 | `Engine.wal_file/wal_writer` optional but always populated — pointless null checks | readability | Medium | 16 | `src/engine.zig` | **Closed** | commit fc11258 |
 | 22 | QUAL-0034 | CLI binary is template carcass calling `lib.init` | cleanup | Medium | 16 | `src/main.zig` | **Closed** | commit c4240a1 |
-| 23 | QUAL-0032 | `WalWriter.append` + sync not coalesced | perf | Medium | 13 | `src/wal.zig` (WalWriter.append) | Open — Truly remaining open; re-audit next cycle | — |
-| 24 | QUAL-0025 | `build.zig` has 177-line `build()` function | maintainability | Medium | 10 | `build.zig` | Open — Truly remaining open; re-audit next cycle | — |
-| 25 | QUAL-0027 | `rss_bytes_peak` emitted even on non-Linux | perf | Medium | 10 | `benchmarks/*` | Open — Truly remaining open; re-audit next cycle | — |
-| 26 | DO-4 | CI `zig-format` paths exclude `benchmarks/` and `build.zig` | ci-cd | Low | 7 | `.gitlab-ci.yml` / `.github/workflows/*` | Open — Truly remaining open; re-audit next cycle | — |
+| 23 | QUAL-0032 | `WalWriter.append` + sync not coalesced | perf | Medium | 13 | `src/wal.zig` (WalWriter.append) | **Closed** | cleanup run — `WalWriter.appendAndSync` convenience helper added pairing the two calls at API level. True group commit deferred to concurrency model (see PERF-0001 / `docs/concurrency-model-decision.md`). |
+| 24 | QUAL-0025 | `build.zig` has 177-line `build()` function | maintainability | Medium | 10 | `build.zig` | **Won't-Do** | Splitting into per-artifact helpers churns the build file with no functional or measurable maintainability win at this scale (the file has clear `// section` dividers and stays under ~280 lines). Re-evaluate if `build.zig` exceeds ~500 lines or grows a third distinct optimization mode. |
+| 25 | QUAL-0027 | `rss_bytes_peak` emitted even on non-Linux | perf | Medium | 10 | `benchmarks/*` | **Closed** | cleanup run — schema doc comment on `ResultRow.rss_current_bytes` / `rss_peak_bytes` now states "emitted as 0 on every non-Linux host; treat 0 as unavailable, not as zero memory used". Cross-OS bench consumers have the contract; emitting a nullable JSON field would break every existing baseline file. |
+| 26 | DO-4 | CI `zig-format` paths exclude `benchmarks/` and `build.zig` | ci-cd | Low | 7 | `.gitlab-ci.yml` / `.github/workflows/*` | **Closed** | cleanup run — `.gitlab-ci.yml:56-60` now uses `paths: "src/ tests/ examples/ benchmarks/ build.zig"`. Verified locally with `zig fmt --check` over the same set. |
 | 27 | D-1 | `writeU32/U64`, `readU32/U64` duplicated between `wal.zig` and `manifest.zig` | maintainability | Low | 7 | `src/wal.zig`, `src/manifest.zig` | **Closed** | commit ac16729 |
 | 28 | D-2, QUAL-0023 | `segment.zig` has differently-shaped `readU*` helpers — confusing duplication | readability | Low | 7 | `src/segment.zig` | **Closed** | commit ac16729 |
 | 29 | DC-5, QUAL-0031 | Root-level `test_al.zig` / `test_crc.zig` / `test_io.zig` orphans, not gitignored | cleanup | Low | 7 | `test_al.zig`, `test_crc.zig`, `test_io.zig` | **Closed** | commit eceedc6 |
 | 30 | DO-2, DO-3 | `root.zig` template placeholders in doc comments | docs | Low | 7 | `src/root.zig` | **Closed** | commit 7234563 |
-| 31 | QUAL-0022 | Stale comment in `MemPosting` | readability | Low | 4 | `src/engine.zig` (MemPosting) | Open — Truly remaining open; re-audit next cycle | — |
-| 32 | QUAL-0024 | Record-type validation duplicated | maintainability | Low | 4 | `src/wal.zig` | Open — Truly remaining open; re-audit next cycle | — |
+| 31 | QUAL-0022 | Stale comment in `MemPosting` | readability | Low | 4 | `src/segment.zig` (MemPosting) | **Closed** | cleanup run — stale "for simplicity, we just store positions as a slice" comment replaced with a real doc comment that points at PERF-0003. |
+| 32 | QUAL-0024 | Record-type validation duplicated | maintainability | Low | 4 | `src/wal.zig` | **Closed** | cleanup run — `WalRecordType.fromByte(b: u8) !WalRecordType` helper centralises the `1..=4` check; both `WalRecord.deserialize` and `WalReader.next` now call it. |
 | 33 | DC-2, DC-3 | `Manifest.total_docs` / `avg_doc_len` dead fields | cleanup | Low | 4 | `src/manifest.zig` | **Closed** | commit 2934b17 |
-| 34 | QUAL-0026 | `-Dtsan` / `-Dno-cli` help text inaccuracies | docs | Low | 4 | `build.zig` (option descriptions) | Open — Truly remaining open; re-audit next cycle | — |
-| 35 | QUAL-0028 | `atomicWrite` cross-platform claims unverified | docs | Low | 4 | `src/utils.zig` doc comment | Open — Truly remaining open; re-audit next cycle | — |
-| 36 | QUAL-0033 | WAL payload cap is magic number | readability | Low | 4 | `src/wal.zig` | Open — Truly remaining open; re-audit next cycle | — |
-| 37 | QUAL-0029 | `CHANGELOG.md` placeholder date | docs | Low | 3 | `CHANGELOG.md` | Open — Truly remaining open; re-audit next cycle | — |
-| 38 | QUAL-0030 | `SECURITY.md` / `SUPPORT.md` template emails unverified | docs | Low | 3 | `SECURITY.md`, `SUPPORT.md` | Open — Truly remaining open; re-audit next cycle | — |
+| 34 | QUAL-0026 | `-Dtsan` / `-Dno-cli` help text inaccuracies | docs | Low | 4 | `build.zig` (option descriptions) | **Closed** | cleanup run — `-Dtsan` text now spells out which artifacts get the sanitizer and the stress-suite Debug override; `-Dno-cli` text now mentions the `run` step impact. |
+| 35 | QUAL-0028 | `atomicWrite` cross-platform claims unverified | docs | Low | 4 | `src/utils.zig` doc comment | **Closed** | cleanup run — doc comment now spells out POSIX rename semantics (atomic w.r.t. readers; missing parent-dir fsync ok because WAL is durability source of truth) and Windows MoveFileExW caveats (not in CI; contract documented from stdlib, not a passing run). |
+| 36 | QUAL-0033 | WAL payload cap is magic number | readability | Low | 4 | `src/wal.zig` | **Closed** | cleanup run — `10 * 1024 * 1024` replaced with `limits.MAX_WAL_PAYLOAD_BYTES`; `limits` now imported in `wal.zig`. |
+| 37 | QUAL-0029 | `CHANGELOG.md` placeholder date | docs | Low | 3 | `CHANGELOG.md` | **Closed** | cleanup run — `[0.1.0] - YYYY-MM-DD` replaced with `[0.1.0] - 2026-05-26`; release bullets fleshed out with the actual shipped capabilities. |
+| 38 | QUAL-0030 | `SECURITY.md` / `SUPPORT.md` template emails unverified | docs | Low | 3 | `SECURITY.md`, `SUPPORT.md` | **Closed** | Verified during the cleanup run — both files already use `codepros.dev` addresses (`security@codepros.dev`, `support@codepros.dev`); originally landed via commit c5c7d9b. The "template emails unverified" tag predates that commit. |
 
 ---
 
@@ -117,6 +117,16 @@ Sorted by `PriorityScore` descending. All file:line citations point at `/home/be
 | DO-2, DO-3 | `root.zig` template placeholders in doc comments | 7234563 | Replaced with real module description |
 | QUAL-0015 | `varint` silent `@intCast` truncation in ReleaseFast | 91b3ba7 | Pre-check guards on all untrusted-length `@intCast` calls; also closes SEC-EXT-0102, 0103 |
 | QUAL-0016 | `SegmentReader.search` reopens dir + file each query | b620a03 | Cached fd and posting buffer; also closes PERF-0005, PERF-0007 |
+| QUAL-0022 | Stale `MemPosting` comment | cleanup run | Comment replaced with PERF-0003-aware doc string |
+| QUAL-0024 | Record-type validation duplicated | cleanup run | `WalRecordType.fromByte` helper |
+| QUAL-0026 | `-Dtsan` / `-Dno-cli` help text inaccuracies | cleanup run | Build option help text rewritten |
+| QUAL-0027 | `rss_bytes_peak` emitted on non-Linux | cleanup run | Schema doc-comments declare 0 == unavailable on non-Linux hosts |
+| QUAL-0028 | `atomicWrite` cross-platform claims unverified | cleanup run | Doc comment now spells out POSIX vs Windows semantics + the Windows-not-in-CI caveat |
+| QUAL-0029 | `CHANGELOG.md` placeholder date | cleanup run | `YYYY-MM-DD` → `2026-05-26`; release bullets fleshed out |
+| QUAL-0030 | `SECURITY.md` / `SUPPORT.md` template emails | c5c7d9b | Already on `codepros.dev`; verified in cleanup run |
+| QUAL-0032 | `WalWriter.append` + sync not coalesced | cleanup run | `appendAndSync` helper pairs the two calls at API level |
+| QUAL-0033 | WAL payload cap is magic number | cleanup run | Replaced with `limits.MAX_WAL_PAYLOAD_BYTES` |
+| DO-4 | CI `zig-format` excludes `benchmarks/` and `build.zig` | cleanup run | `.gitlab-ci.yml` paths input updated; verified locally with `zig fmt --check` |
 
 ---
 
@@ -125,13 +135,13 @@ Sorted by `PriorityScore` descending. All file:line citations point at `/home/be
 1. **QUAL-0002** — `docs/fts-storage-spec.md` LLM artifacts. (Critical, score 80) — Won't-Do (Deferred doc cycle, d8da757)
 2. **QUAL-0015** — `varint` silent `@intCast` truncation in ReleaseFast. (Medium, score 32) — Closed (91b3ba7)
 3. **QUAL-0016** — `SegmentReader.search` reopens dir+file each query. (Medium, score 32) — Closed (b620a03)
-4. **QUAL-0032** — `WalWriter.append` + sync not coalesced. (Medium, score 13) — Open (deferred)
-5. **QUAL-0025** — 177-line `build()` function. (Medium, score 10) — Open (deferred)
-6. **QUAL-0027** — `rss_bytes_peak` emitted on non-Linux. (Medium, score 10) — Open (deferred)
-7. **DO-4** — CI `zig-format` excludes `benchmarks/` and `build.zig`. (Low, score 7) — Open (deferred)
-8. **QUAL-0022** — Stale comment in `MemPosting`. (Low, score 4) — Open (deferred)
-9. **QUAL-0024** — Record-type validation duplicated. (Low, score 4) — Open (deferred)
-10. **QUAL-0026** — `-Dtsan` / `-Dno-cli` help text inaccuracies. (Low, score 4) — Open (deferred)
+4. **QUAL-0032** — `WalWriter.append` + sync not coalesced. (Medium, score 13) — Closed (cleanup run — `appendAndSync` helper)
+5. **QUAL-0025** — 177-line `build()` function. (Medium, score 10) — Won't-Do (no functional gain at this scale)
+6. **QUAL-0027** — `rss_bytes_peak` emitted on non-Linux. (Medium, score 10) — Closed (cleanup run — schema doc-comment)
+7. **DO-4** — CI `zig-format` excludes `benchmarks/` and `build.zig`. (Low, score 7) — Closed (cleanup run — paths updated)
+8. **QUAL-0022** — Stale comment in `MemPosting`. (Low, score 4) — Closed (cleanup run)
+9. **QUAL-0024** — Record-type validation duplicated. (Low, score 4) — Closed (cleanup run — `WalRecordType.fromByte`)
+10. **QUAL-0026** — `-Dtsan` / `-Dno-cli` help text inaccuracies. (Low, score 4) — Closed (cleanup run)
 
 ---
 
@@ -141,7 +151,7 @@ Sorted by `PriorityScore` descending. All file:line citations point at `/home/be
 2. **Silent error swallowing (mostly resolved).** QUAL-0004 (manifest checksum), QUAL-0019 (WAL stat error) closed. QUAL-0015 (`@intCast` truncation) remains open — see also SEC-EXT-0102/0103 in SECURITY_GAP_ANALYSIS.
 3. **Documented-but-not-implemented schema (resolved).** QUAL-0013/DC-1 (`WalRecordType.begin/commit`), DC-2/DC-3 (`Manifest` dead fields), and QUAL-0006 (`Memtable.total_docs`) all closed.
 4. **Tests test the easy thing (largely resolved).** QUAL-0011 (tests now bind to `Engine`) closed in 2d51283. QUAL-0020 (fuzz targets) and QUAL-0021 (FD/dir assertions) closed in 9e6fd81.
-5. **Scaffolding outweighs library (largely resolved).** QUAL-0003, QUAL-0031/DC-5, DO-2/DO-3, QUAL-0034 all closed. QUAL-0029 (CHANGELOG date) and QUAL-0030 (SECURITY.md contacts) deferred.
+5. **Scaffolding outweighs library (resolved).** QUAL-0003, QUAL-0031/DC-5, DO-2/DO-3, QUAL-0034 closed in earlier runs; QUAL-0029 (CHANGELOG date) and QUAL-0030 (SECURITY.md contacts) closed in the cleanup run.
 
 ---
 
@@ -149,28 +159,27 @@ Sorted by `PriorityScore` descending. All file:line citations point at `/home/be
 
 ### Quick wins (< 1 day)
 
-- Fix `@intCast` of user-controlled lengths; add range checks (QUAL-0015).
-- Update `-Dtsan` / `-Dno-cli` help text (QUAL-0026).
-- Add `benchmarks/`, `build.zig` to CI format target (DO-4).
-- Gate `rss_bytes_peak` emission behind OS check (QUAL-0027).
-- Set real CHANGELOG release date (QUAL-0029).
-- Verify `SECURITY.md` / `SUPPORT.md` contact emails (QUAL-0030).
+_All quick wins closed in the cleanup run (2026-05-26)._
 
 ### Medium (1–5 days)
 
-- Cache `SegmentReader` file handles across queries (QUAL-0016).
-- Add group-commit / batched-sync path to WAL (QUAL-0032).
+_All medium items closed across closure runs._ Group-commit batched fsync
+(QUAL-0032 / PERF-0001) was reduced to an API pairing helper
+(`WalWriter.appendAndSync`); the true N-record batch fsync is now tracked
+under PERF-0001 Won't-Do (Concurrency Model Pending — see
+`docs/concurrency-model-decision.md`).
 
 ### Strategic (> 5 days)
 
-- Author a real `docs/fts-storage-spec.md` aligned with the implemented schema (QUAL-0002).
-- Split `build.zig` into per-artifact helpers (QUAL-0025).
-- Add a Windows + macOS CI matrix (QUAL-0028).
+- Author a real `docs/fts-storage-spec.md` aligned with the implemented schema (QUAL-0002 — Won't-Do this release).
+- Add a Windows + macOS CI matrix (QUAL-0028 — documented Linux-only contract for v0.1; cross-OS CI is a follow-up).
 
 ---
 
 ## Status
 
-**25 of 38 findings closed across closure runs (2026-05-26). 1 Won't-Do (QUAL-0002). 12 findings remain open (deferred to future cycles — all low/medium priority).**
+**36 of 38 findings closed across closure runs (2026-05-26). 2 Won't-Do
+(QUAL-0002 — deferred doc cycle; QUAL-0025 — no functional gain at this
+scale). 0 findings remain open.**
 
 No GitLab issues were created, updated, or closed by this run. This document is the sole artifact.

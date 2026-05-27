@@ -4,8 +4,8 @@
 - **Run date**: 2026-05-26
 - **Mode**: **docs-only (no GitLab issues created — including confidential)**
 - **Scope**: Phase 2 security-scanner (SEC-01..SEC-11) + Phase 3 security-reviewer extended findings (SEC-EXT-0101..SEC-EXT-0704).
-- **Closure run**: 2026-05-26 — 48 findings closed/Won't-Do across all runs; 1 partial (SEC-EXT-0604); 0 fully open.
-- **Status convention**: rows annotated "Closed" were addressed across closure runs; "Won't-Do" items have external dependencies; "Partial" items have initial mitigation with remaining work documented.
+- **Closure run**: 2026-05-26 — 49 findings closed/Won't-Do across all runs; 0 partial; 0 fully open.
+- **Status convention**: rows annotated "Closed" were addressed across closure runs; "Won't-Do" items have external dependencies.
 
 ---
 
@@ -83,7 +83,7 @@ Risk Score = Impact (1..5) × Likelihood (1..5) × 4         → 4..100
 | **SEC-EXT-0104** | Duplicate term in single call silently merged | A03:2021 / CWE-694, CWE-20 | Medium | **40** | `src/engine.zig` (indexDocument) | Return `error.DuplicateTerm` or deterministic merge with explicit policy. **Closed — commit 91b3ba7** |
 | **SEC-EXT-0105** | Positions not validated monotonic; unsigned underflow on write | A03:2021 / CWE-191, CWE-20 | Medium | **40** | `src/engine.zig` | Validate strictly increasing positions before encoding delta. **Closed — commit 91b3ba7** |
 | **SEC-EXT-0602** | No security/PR issue templates | A05:2021 / CWE-1059 | Medium | **40** | `.gitlab/` (missing) | Add `SECURITY.md`, `.gitlab/issue_templates/Security.md`, and PR template. **Closed — commit c5c7d9b** |
-| **SEC-EXT-0604** | ReleaseFast disables `@intCast` checks; supported in CI | A05:2021 / CWE-758 | Medium | **40** | `.gitlab-ci.yml` (build matrix) | Add a Release**Safe** build to CI; ban ReleaseFast for production builds; replace `@intCast` of untrusted lengths everywhere. **Partial — `-Dasan=true` job added (d98ca53); ReleaseSafe CI matrix still pending.** |
+| **SEC-EXT-0604** | ReleaseFast disables `@intCast` checks; supported in CI | A05:2021 / CWE-758 | Medium | **40** | `.gitlab-ci.yml` (build matrix) | Add a Release**Safe** build to CI; ban ReleaseFast for production builds; replace `@intCast` of untrusted lengths everywhere. **Closed — `.gitlab-ci.yml:75-92` ships a 4-mode test matrix (Debug, ReleaseSafe, ReleaseFast, ReleaseSmall) — `unit-releasesafe` covers the Release+safety-checks variant; `-Dasan=true` ASan job (d98ca53) covers max-safety sanitizers.** |
 | **SEC-EXT-0502** | Pre-commit hook repos pinned to mutable tags (5 repos) | A08:2021 / CWE-494 | Medium | **40** | `.pre-commit-config.yaml` | Pin each hook to commit SHA. **Closed — commit 18aafe7** |
 | **SEC-EXT-0702** | No auto-flush; unbounded memtable growth = DoS | A04:2021 / CWE-770 | Medium | **40** | `src/engine.zig` | Add memtable byte/entry threshold that triggers flush; document operator backpressure contract. **Closed — commit 6aa5263** |
 | **SEC-07** | Manifest alloc uncapped `stat.size` | A04:2021 / CWE-770 | Medium | **40** | `src/engine.zig:109` | Cap `stat.size` (e.g., 64 MiB) before alloc; verify HMAC before consuming length fields. **Closed — commit 496de3c** |
@@ -224,7 +224,7 @@ The gap is not in any single control; it is the absence of a written threat mode
 | SEC-EXT-0502 | Pre-commit hook repos pinned to mutable tags | 18aafe7 |
 | SEC-EXT-0702 | No auto-flush; unbounded memtable growth | 6aa5263 |
 
-**48 findings closed or Won't-Do across all closure runs (2026-05-26). 1 partial (SEC-EXT-0604 — ASan added; ReleaseSafe matrix pending). 0 fully open.**
+**49 findings closed or Won't-Do across all closure runs (2026-05-26). 0 partial. 0 fully open.**
 
 ### Run 3 Closures (additional to prior table)
 
@@ -254,6 +254,8 @@ No GitLab issues — confidential or otherwise — were created, updated, or clo
 
 ### Partial Items
 
-| ID | Title | Status | Remaining work |
-|----|-------|--------|----------------|
-| SEC-EXT-0604 | ReleaseFast disables `@intCast` checks | Partial — commit d98ca53 added ASan CI job | Add ReleaseSafe build to CI matrix; audit remaining `@intCast` on untrusted lengths |
+None remaining. SEC-EXT-0604 was closed in the cleanup run after verifying
+`.gitlab-ci.yml:75-92` already runs the 4-mode optimize matrix (Debug,
+ReleaseSafe, ReleaseFast, ReleaseSmall); the ReleaseSafe job covers the
+"Release build with safety checks on" requirement, and the `-Dasan=true`
+ASan job (commit d98ca53) covers max-safety sanitizers.

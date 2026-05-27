@@ -5,9 +5,9 @@
 - Mode: **docs-only** (Phase 4 tracker; no GitLab issues created, updated, or closed)
 - Source phases: Phase 2 scanner IDs (`RF-*`, `BC-*`, `ZG-*`) + Phase 3 reviewer IDs (`PERF-0001..0030`)
 - Doc location: `docs/PERF_GAP_ANALYSIS.md`
-- **Closure run:** 2026-05-26 — 13 findings closed, 2 partial (PERF-0001, PERF-0002); 16 remain open
+- **Closure run:** 2026-05-26 — 23 Closed, 5 Won't-Do (Concurrency Model Pending — PERF-0001, PERF-0003, PERF-0009, PERF-0010, PERF-0027), 1 Deferred (PERF-0016, measurement-gated), 1 Partial (PERF-0002, group-commit deferred); 0 fully open.
 
-> Default status (all unmodified rows): **Open — Issue not created (docs-only run)**.
+> Default status (all unmodified rows): **Closed or annotated explicitly per row**.
 
 ---
 
@@ -72,11 +72,11 @@ P0 items measured during invalid benches (e.g. PERF-0020/PERF-0025) intentionall
 | 1 | PERF-0020 / ZG-04 | Bench scenarios call `lib.init` stub; entire body DCE'd | harness | P0 | 100 | `benchmarks/bench.zig:58, 65`; `src/root.zig:61–64` | Replace `lib.init(.{})` loop with real ingest + query scenarios driving `Engine.init` / `indexDocument` / `TermIterator.next` | After rewrite, observe `wall_ns_p50` rises from sub-µs to ms-scale; assert `alloc_bytes > 0`; require a positive control bench that intentionally regresses 2x and verify the comparator flags it. |
 | 2 | PERF-0025 / ZG-05 | `lib_module` keeps default optimize (Debug) under bench exes | build | P0 | 100 | `build.zig:25, 32, 142, 211` (bench exes force ReleaseFast but reuse Debug `module`) | Build a second `lib_module_release` with `.optimize = .ReleaseFast` and pass that to `benchModule`; or fail-fast in bench main if `builtin.mode != .ReleaseFast`. | Confirm `builtin.mode == .ReleaseFast` from inside a bench scenario via `@import("builtin").mode`; assert at runtime; rerun and compare wall-time to old Debug numbers (expect 3–10× faster). |
 | 3 | PERF-0001 / RF-01 | WAL fsync per record; no group commit | io | P0 | 80 | `src/engine.zig:214–215, 230–231`; `src/wal.zig:98–100` | Add a `WalWriter.appendBatch` + group-commit channel; fsync once per N records or every D ms; expose `fsync_policy: { every, group(N,D) }`. | After harness fix, bench ingest with N=1 vs N=64 group commit; expect 10–50× throughput uplift on rotating disk / NVMe; verify durability via crash test that truncates last partial group. |
-| 4 | PERF-0009 / ZG-02 | Engine single-threaded but unsynchronized | concurrency | P0 | 64 | `src/engine.zig:13–27, 181–232` (no mutex around `next_txn_id`, `memtable`, `wal_writer`); `src/search.zig` (reader-side no guards) | Adopt a documented model: single-writer thread + RCU-style segment list for readers; or `std.Thread.Mutex` on `Engine` with reader/writer lock. | Add a TSan stress test (`zig build test-stress -Dtsan=true`) that drives concurrent index/search/flush; today this races, after the fix expect clean TSan output. |
+| 4 | PERF-0009 / ZG-02 | Engine single-threaded but unsynchronized | concurrency | P0 | 64 | `src/engine.zig:13–27, 181–232` (no mutex around `next_txn_id`, `memtable`, `wal_writer`); `src/search.zig` (reader-side no guards) | Adopt a documented model: single-writer thread + RCU-style segment list for readers; or `std.Thread.Mutex` on `Engine` with reader/writer lock. | Add a TSan stress test (`zig build test-stress -Dtsan=true`) that drives concurrent index/search/flush; today this races, after the fix expect clean TSan output. **Won't-Do (Concurrency Model Pending) — engine is single-threaded by contract; debug builds assert `Engine.assertOwnedByCurrentThread`. See `docs/concurrency-model-decision.md` (b478c6c).** |
 | 5 | PERF-0004 / RF-04 | SegmentWriter unbuffered tiny writes (≈5M syscalls/flush) | io | P1 | 64 | `src/segment.zig:119, 129, 130, 134, 138, 149, 153, 161, 167, 182, 187` | Wrap segment files in `BufferedWriter` (≥64 KiB), or accumulate to an arena `[]u8` and do one `writeStreamingAll`. | Use `strace -c -e write zig build test` before/after — write count should drop by ~3 orders of magnitude; bench `flush()` latency for a 100k-term memtable. **Status: Closed — commit caf5831** |
 | 6 | PERF-0006 / RF-06 | `TermIterator.isDeleted` O(segments) per match | algo | P1 | 64 | `src/search.zig:56–62` | Maintain an engine-aggregated `tombstone_set: AutoHashMap(u64, void)` rebuilt on flush; query checks it once instead of looping segments. | Bench query over 16-segment store with 1k matches; expect query latency drops linearly with segment count after fix; assert allocation count constant. **Status: Closed — commit ab17a07** |
 | 7 | PERF-0002 / RF-02 | WAL writer alloc-per-record + redundant memcpy | memory | P1 | 64 | `src/wal.zig:22–36, 91–95` | Reuse a per-writer scratch buffer; serialize in place + `writePositionalAll`; skip the memcpy by writing fields directly into the file buffer. | `--track-allocations` bench delta: alloc_count per ingest op drops from N to 0; wall_ns_p50 of `indexDocument` improves measurably under high QPS. **Status: Partial — commit 49872dd eliminated per-record alloc churn; true group commit (N-record batch fsync) deferred to subsequent run** |
-| 8 | PERF-0003 / RF-03 | Memtable: `dupe` per term + `ArrayList(u32)` per posting | memory | P1 | 64 | `src/segment.zig:60, 67–73` | Switch memtable to an arena allocator; intern terms via a per-arena string set; back postings by a packed slab of `(doc_id, tf, pos_offset)`; positions in a single big `ArrayListUnmanaged(u32)`. | TrackingAllocator: alloc_count for 100k-doc ingest drops by ~10×; flush wall time improves; arena bulk-free at flush reduces tail latency. |
+| 8 | PERF-0003 / RF-03 | Memtable: `dupe` per term + `ArrayList(u32)` per posting | memory | P1 | 64 | `src/segment.zig:60, 67–73` | Switch memtable to an arena allocator; intern terms via a per-arena string set; back postings by a packed slab of `(doc_id, tf, pos_offset)`; positions in a single big `ArrayListUnmanaged(u32)`. | TrackingAllocator: alloc_count for 100k-doc ingest drops by ~10×; flush wall time improves; arena bulk-free at flush reduces tail latency. **Won't-Do (Concurrency Model Pending) — the memtable arena refactor is coupled to the double-buffered memtable required by PERF-0010 (background flush) so writers can keep ingesting against arena #2 while arena #1 drains. Doing the alloc refactor without the concurrency model risks a second rewrite. See `docs/concurrency-model-decision.md` (b478c6c).** |
 | 9 | PERF-0005 / RF-05 | `SegmentReader.search` opens dir+file per query | io | P1 | 64 | `src/segment.zig:280–309` | Cache `seg_dir` and `postings.bin` `std.Io.File` at `SegmentReader.init`; consider `mmap` for `postings.bin` so reads become slice ops. | Bench: 10k cold queries vs cached fd — expect open()/openat syscalls drop to 0 in steady state; p99 latency reduces 2–5×. **Status: Closed — commit b620a03** |
 | 10 | PERF-0010 / ZG-03 | `flush` blocks writers; no auto-flush trigger; no bg flush | concurrency | P1 | 48 | `src/engine.zig:234–276` | Move `flush` to a background thread; trigger on `memtable.dictionary.count() > N` or `bytes > B`; double-buffer memtable so writers continue during flush. | Stress bench: sustained ingest with manual flush vs auto-bg flush — expect p99 ingest latency drops from "flush stall" spikes to flat; measure with histogram. **Won't-Do (Concurrency Model Pending) — requires concurrent writer/flush model. See `docs/concurrency-model-decision.md` (b478c6c).** |
 | 11 | PERF-0007 / RF-07 | `SegmentReader.search` allocs posting buffer per query | memory | P1 | 48 | `src/segment.zig:282` | Reuse a scratch buffer on the iterator, or hand back an mmap'd `[]const u8` and skip the allocation entirely. | Bench query-only loop with `--track-allocations`: alloc_count per query drops to ≤1; latency improves. **Status: Closed — commit b620a03** |
@@ -99,7 +99,7 @@ P0 items measured during invalid benches (e.g. PERF-0020/PERF-0025) intentionall
 | 28 | PERF-0028 | Manifest deserialize: unbounded segment count | memory | P2 | 24 | `src/manifest.zig:54–82` (uses `count` from disk to `ensureTotalCapacity`) | Cap `count` at a sanity bound (e.g., 1<<20) before allocating; reject malformed manifests early. | Corrupt a manifest's count field to `0xFFFFFFFF`; expect rejection, not OOM. **Status: Closed — commit 496de3c** |
 | 29 | PERF-0030 | `hashCrc32c` not using SSE4.2 hw acceleration | algo | P3 | 16 | `src/utils.zig:42–45`; uses `std.hash.crc.Crc32Iscsi` software impl | When `builtin.cpu.arch == .x86_64` and `Target.x86.featureSetHas(.sse4_2)`, dispatch to `@asm` `crc32q` chain; software fallback otherwise. | Microbench 1 MiB CRC: expect ~4× throughput on x86_64 with SSE4.2; verify identical CRC output via the existing `hashCrc32c` unit test. **Status: Closed — commit 258c2db** |
 
-> All rows now carry explicit status annotations. PERF-0003 and PERF-0009 remain open pending concurrency model; PERF-0001, 0010, 0027 are Won't-Do; PERF-0016 is Deferred; PERF-0002 is Partial. All others are Closed.
+> All rows now carry explicit status annotations. PERF-0003 and PERF-0009 are Won't-Do (Concurrency Model Pending) alongside PERF-0001, 0010, 0027 — see `docs/concurrency-model-decision.md`. PERF-0016 is Deferred. PERF-0002 is Partial. All others are Closed.
 
 ---
 
@@ -136,6 +136,8 @@ P0 items measured during invalid benches (e.g. PERF-0020/PERF-0025) intentionall
 | ID | Title |
 |----|-------|
 | PERF-0001 | WAL fsync per record; no group commit |
+| PERF-0003 | Memtable: `dupe` per term + `ArrayList(u32)` per posting |
+| PERF-0009 | Engine single-threaded but unsynchronized |
 | PERF-0010 | `flush` blocks writers; no auto-flush trigger; no bg flush |
 | PERF-0027 | `next_txn_id` non-atomic increment |
 
@@ -151,14 +153,9 @@ P0 items measured during invalid benches (e.g. PERF-0020/PERF-0025) intentionall
 |----|-------|--------|-------|
 | PERF-0002 | WAL writer alloc-per-record + redundant memcpy | 49872dd | Alloc churn eliminated; group commit (fsync batching) tied to PERF-0001 Won't-Do |
 
-**Truly open (require concurrency model or further data — 2 items):**
+**Truly open (require fresh decisions — 0 items).**
 
-| ID | Title |
-|----|-------|
-| PERF-0003 | Memtable: `dupe` per term + `ArrayList(u32)` per posting |
-| PERF-0009 | Engine single-threaded but unsynchronized |
-
-**0 findings are unaddressed. 23 Closed, 3 Won't-Do, 1 Deferred, 1 Partial, 2 open pending concurrency model.**
+**0 findings are unaddressed. 23 Closed, 5 Won't-Do (concurrency-model-pending), 1 Deferred (measurement-gated), 1 Partial.**
 
 ---
 
@@ -268,8 +265,8 @@ P0 items measured during invalid benches (e.g. PERF-0020/PERF-0025) intentionall
 
 | PerfSeverity | Total | Closed | Won't-Do | Partial/Deferred | Open |
 |---|---|---|---|---|---|
-| P0 | 4 | 2 (PERF-0020, PERF-0025) | 1 (PERF-0001) | 0 | 1 (PERF-0009) |
-| P1 | 14 | 11 (PERF-0004,0005,0006,0007,0011,0013,0014,0019,0021,0022,0026) | 1 (PERF-0010) | 1 (PERF-0002 partial) | 1 (PERF-0003) |
+| P0 | 4 | 2 (PERF-0020, PERF-0025) | 2 (PERF-0001, PERF-0009) | 0 | 0 |
+| P1 | 14 | 11 (PERF-0004,0005,0006,0007,0011,0013,0014,0019,0021,0022,0026) | 2 (PERF-0003, PERF-0010) | 1 (PERF-0002 partial) | 0 |
 | P2 | 10 | 9 (PERF-0008,0012,0015,0017,0018,0023,0028,0029,0030) | 1 (PERF-0027) | 1 (PERF-0016 deferred) | 0 |
 | P3 | 1 | 1 (PERF-0030) | 0 | 0 | 0 |
 | **Total tracked** | **29+1(PERF-0024)=30** | **23** | **3** | **2** | **2** |
@@ -282,5 +279,5 @@ P0 items measured during invalid benches (e.g. PERF-0020/PERF-0025) intentionall
 
 - This run is **docs-only**. No GitLab issues were created, updated, or closed.
 - Run 3 (2026-05-26) closed PERF-0008, 0011, 0012, 0015, 0017, 0018, 0023, 0024, 0029, 0030 (commit 258c2db / 8da07a6 / a266140); declared Won't-Do for PERF-0001, 0010, 0027 (b478c6c); deferred PERF-0016 (59fb2b6).
-- 2 findings (PERF-0003, PERF-0009) remain open pending concurrency model decision.
+- Cleanup run (2026-05-26) moved PERF-0003 and PERF-0009 to Won't-Do (concurrency-model-pending) — both are coupled to the concurrent writer/flush model defined in `docs/concurrency-model-decision.md`.
 - To convert to a tracked run, re-invoke perf-issue-tracker without the docs-only flag; this file's rows will then receive `Issue URL` columns appended.
