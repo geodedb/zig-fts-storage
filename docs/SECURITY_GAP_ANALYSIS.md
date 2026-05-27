@@ -4,7 +4,7 @@
 - **Run date**: 2026-05-26
 - **Mode**: **docs-only (no GitLab issues created — including confidential)**
 - **Scope**: Phase 2 security-scanner (SEC-01..SEC-11) + Phase 3 security-reviewer extended findings (SEC-EXT-0101..SEC-EXT-0704).
-- **Closure run**: 2026-05-26 — 39 findings closed, 4 Won't-Do, across all commits; 6 remain open.
+- **Closure run**: 2026-05-26 — 38 findings closed, 4 Won't-Do, across all commits; 6 remain open.
 - **Status convention**: rows annotated "Closed" were addressed across closure runs; "Won't-Do" items have external dependencies; all other rows remain `Open — Issue not created (docs-only run)`.
 
 ---
@@ -224,7 +224,7 @@ The gap is not in any single control; it is the absence of a written threat mode
 | SEC-EXT-0502 | Pre-commit hook repos pinned to mutable tags | 18aafe7 |
 | SEC-EXT-0702 | No auto-flush; unbounded memtable growth | 6aa5263 |
 
-**39 findings closed, 3 Won't-Do across all closure runs (2026-05-26). 6 findings remain open.**
+**38 findings closed, 4 Won't-Do, across all closure runs (2026-05-26). 6 findings remain open.**
 
 ### Won't-Do Items (external dependency — devnw/ci-catalog)
 
