@@ -1,3 +1,22 @@
+<!-- markdownlint-disable MD028 -->
+> **NOTE**: This document is the upstream Geode design analysis that
+> motivated the fts-storage library. It contains references to
+> Geode-internal files (`src/index/fulltext.zig`,
+> `src/storage/graph_storage_adapter.zig`, etc.) that do not exist in this
+> repo, and `citeturn*` tokens from its LLM-assisted authorship. It is
+> preserved as design history, not normative spec.
+>
+> For the standalone library contract, see:
+>
+> - `src/root.zig` (public API)
+> - `docs/REQUIREMENTS.md` (requirements mirror)
+> - `docs/concurrency-model-decision.md`
+> - `docs/host-integration-scope.md`
+>
+> A clean, normative spec rewrite is tracked as GAP-0025 / QUAL-0002 and
+> deferred to a dedicated documentation cycle.
+<!-- markdownlint-enable MD028 -->
+
 # Optimizing Full‑Text Search Storage in Geode
 
 ## Executive summary
