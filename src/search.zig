@@ -206,6 +206,120 @@ pub const TermIterator = struct {
     }
 };
 
+/// PhraseIterator yields documents in which a sequence of terms appears in
+/// consecutive positions (slop = 0) or within a configurable position window
+/// (slop > 0). Wraps one TermIterator per phrase term and gates on positional
+/// alignment.
+///
+/// Complexity: O(N * M * P) where N is the matches for the leading term, M is
+/// the phrase length, and P is the per-doc position-list length. This is a
+/// minimum-viable implementation — production phrase search uses positional
+/// skip-lists and a true k-way merge. WRK-036 (GAP-0001).
+pub const PhraseIterator = struct {
+    eng: *engine.Engine,
+    term_iters: []TermIterator,
+    slop: u32,
+    allocator: Allocator,
+
+    pub fn init(
+        allocator: Allocator,
+        eng: *engine.Engine,
+        terms: []const []const u8,
+        slop: u32,
+    ) !PhraseIterator {
+        if (terms.len == 0) return error.EmptyTerm;
+
+        const iters = try allocator.alloc(TermIterator, terms.len);
+        // Track how many iterators were successfully initialized so the
+        // errdefer can tear down exactly those if a later TermIterator.init
+        // fails part-way through.
+        var initialized: usize = 0;
+        errdefer {
+            var i: usize = 0;
+            while (i < initialized) : (i += 1) iters[i].deinit();
+            allocator.free(iters);
+        }
+
+        for (terms, 0..) |t, i| {
+            iters[i] = try TermIterator.init(allocator, eng, t);
+            initialized = i + 1;
+        }
+
+        return .{
+            .eng = eng,
+            .term_iters = iters,
+            .slop = slop,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *PhraseIterator) void {
+        for (self.term_iters) |*it| it.deinit();
+        self.allocator.free(self.term_iters);
+    }
+
+    pub fn next(self: *PhraseIterator) !?TermIterator.Match {
+        // For each candidate doc yielded by the leading term, try to align
+        // the remaining terms at consecutive positions. The trailing terms
+        // are re-iterated via fresh TermIterator handles per candidate doc
+        // — inefficient but correct, and acceptable for a minimum-viable
+        // surface (WRK-036).
+        while (try self.term_iters[0].next()) |m0| {
+            for (m0.positions) |p0| {
+                if (try self.checkPhraseAt(m0.doc_id, p0)) {
+                    return TermIterator.Match{
+                        .doc_id = m0.doc_id,
+                        .positions = m0.positions,
+                        .score = m0.score,
+                    };
+                }
+            }
+        }
+        return null;
+    }
+
+    /// Returns true iff term i can be found at position `start + i` (exact)
+    /// or within `[start + i, start + i + slop]` (slop > 0) in `doc_id`.
+    fn checkPhraseAt(self: *PhraseIterator, doc_id: u64, start: u32) !bool {
+        var i: usize = 1;
+        while (i < self.term_iters.len) : (i += 1) {
+            const want_base: u32 = start +% @as(u32, @intCast(i));
+            const term = self.term_iters[i].term;
+
+            // Fresh iterator so we don't disturb the i-th iterator's main-
+            // line cursor (which the outer next() may consume later, though
+            // in this minimum-viable design only iter[0]'s cursor is
+            // load-bearing).
+            var it = try TermIterator.init(self.allocator, self.eng, term);
+            defer it.deinit();
+
+            var found = false;
+            while (try it.next()) |m| {
+                if (m.doc_id != doc_id) continue;
+                for (m.positions) |p| {
+                    if (self.slop == 0) {
+                        if (p == want_base) {
+                            found = true;
+                            break;
+                        }
+                    } else {
+                        if (p >= want_base and p <= want_base + self.slop) {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                // Don't keep scanning later docs once we've inspected the
+                // target doc's positions — there is only one posting per
+                // (term, doc_id) so a position-list scan is enough.
+                break;
+            }
+            if (!found) return false;
+        }
+        return true;
+    }
+};
+
 // ============================================================================
 // Unit Tests
 // ============================================================================
@@ -293,4 +407,37 @@ test "TermIterator yields BM25 score (rare > common)" {
     const m_common = (try common_it.next()).?;
 
     try std.testing.expect(m_rare.score > m_common.score);
+}
+
+test "PhraseIterator yields docs with consecutive terms" {
+    // WRK-036, GAP-0001: phrase queries require positional matching. doc 1
+    // contains "the quick brown fox" — "quick brown" is a phrase. doc 2
+    // contains "quick", "fox", "brown" at consecutive token offsets but
+    // "quick brown" is NOT adjacent there, so it must not match.
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var eng = try engine.Engine.init(io, alloc, tmp_dir.dir);
+    defer eng.deinit();
+
+    try eng.indexDocument(1, &[_]engine.TermPosting{
+        .{ .term = "the", .positions = &[_]u32{0} },
+        .{ .term = "quick", .positions = &[_]u32{1} },
+        .{ .term = "brown", .positions = &[_]u32{2} },
+        .{ .term = "fox", .positions = &[_]u32{3} },
+    });
+    try eng.indexDocument(2, &[_]engine.TermPosting{
+        .{ .term = "quick", .positions = &[_]u32{0} },
+        .{ .term = "fox", .positions = &[_]u32{1} },
+        .{ .term = "brown", .positions = &[_]u32{2} },
+    });
+
+    var phrase = try PhraseIterator.init(alloc, eng, &[_][]const u8{ "quick", "brown" }, 0);
+    defer phrase.deinit();
+
+    const m = (try phrase.next()).?;
+    try std.testing.expectEqual(@as(u64, 1), m.doc_id);
+    try std.testing.expectEqual(@as(?TermIterator.Match, null), try phrase.next());
 }
