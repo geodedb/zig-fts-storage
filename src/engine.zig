@@ -318,6 +318,13 @@ pub const Engine = struct {
             try self.memtable.addPosting(t.term, doc_id, t.positions);
         }
         self.next_txn_id += 1;
+
+        // Auto-flush so memtable memory is bounded regardless of caller
+        // behavior (SEC-EXT-0702). The threshold is currently a compile-time
+        // constant; configurable per-engine threshold is deferred.
+        if (self.memtable.total_docs >= limits.DEFAULT_MEMTABLE_FLUSH_THRESHOLD_DOCS) {
+            try self.flush();
+        }
     }
 
     pub fn deleteDocument(self: *Engine, doc_id: u64) !void {
@@ -334,6 +341,13 @@ pub const Engine = struct {
 
         try self.wal_writer.append(rec);
         try self.wal_writer.sync();
+
+        // Symmetrical auto-flush check (SEC-EXT-0702). Deletes alone won't
+        // bump total_docs but a delete that follows a burst of indexing may
+        // push us over the threshold here.
+        if (self.memtable.total_docs >= limits.DEFAULT_MEMTABLE_FLUSH_THRESHOLD_DOCS) {
+            try self.flush();
+        }
     }
 
     pub fn flush(self: *Engine) !void {

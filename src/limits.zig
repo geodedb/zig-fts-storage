@@ -28,6 +28,13 @@ pub const MAX_TOMBSTONES_PER_SEGMENT: u32 = 1 << 24;
 /// Maximum byte length of a single segment postings buffer.
 pub const MAX_POSTINGS_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
 
+/// Default memtable flush threshold in distinct documents. Exceeding this
+/// triggers an automatic flush in `Engine.indexDocument` / `deleteDocument`
+/// so memtable memory is bounded regardless of caller behavior
+/// (SEC-EXT-0702). The threshold is currently a compile-time constant; a
+/// runtime-configurable variant via Engine.init options is deferred.
+pub const DEFAULT_MEMTABLE_FLUSH_THRESHOLD_DOCS: u64 = 65536;
+
 test {
     _ = MAX_MANIFEST_BYTES;
 }
