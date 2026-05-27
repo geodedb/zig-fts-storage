@@ -28,6 +28,12 @@ pub const Engine = struct {
     memtable: segment.Memtable,
     segments: std.ArrayListUnmanaged(segment.SegmentReader),
 
+    /// Engine-wide aggregated tombstone set. Built at init from every segment's
+    /// tombstones plus the memtable's tombstones; updated incrementally on
+    /// deleteDocument. Lets TermIterator.isDeleted run in O(1) instead of
+    /// scanning every segment per matched doc (PERF-0006, WRK-031).
+    all_tombstones: std.AutoHashMapUnmanaged(u64, void) = .empty,
+
     wal_file: std.Io.File,
     wal_writer: wal.WalWriter,
     next_txn_id: u64 = 1,
@@ -57,6 +63,7 @@ pub const Engine = struct {
         engine.dir = base_dir;
         engine.memtable = segment.Memtable.init(allocator);
         engine.segments = .empty;
+        engine.all_tombstones = .empty;
 
         // Ensure subdirectories exist. Dir mode 0o700 (owner-only) keeps the
         // WAL and segment data unreadable to other local users on POSIX
@@ -111,6 +118,21 @@ pub const Engine = struct {
         // Replay WAL
         try engine.replayWal();
 
+        // Build the engine-wide aggregated tombstone set so isDeleted is O(1)
+        // (PERF-0006, WRK-031). Walk every segment's tombstones plus the
+        // memtable's tombstones (memtable may have been populated by WAL
+        // replay above).
+        for (engine.segments.items) |*seg_reader| {
+            var ts_it = seg_reader.tombstones.iterator();
+            while (ts_it.next()) |entry| {
+                try engine.all_tombstones.put(allocator, entry.key_ptr.*, {});
+            }
+        }
+        var mt_it = engine.memtable.tombstones.iterator();
+        while (mt_it.next()) |entry| {
+            try engine.all_tombstones.put(allocator, entry.key_ptr.*, {});
+        }
+
         // Open WAL for writing
         engine.wal_file = try engine.wal_dir.createFile(io, "fts.wal", .{
             .truncate = false,
@@ -133,6 +155,7 @@ pub const Engine = struct {
 
         self.current_manifest.deinit(self.allocator);
         self.memtable.deinit();
+        self.all_tombstones.deinit(self.allocator);
         self.allocator.destroy(self);
     }
 
@@ -332,6 +355,10 @@ pub const Engine = struct {
         self.next_txn_id += 1;
 
         try self.memtable.addTombstone(doc_id);
+        // Mirror into the engine-wide aggregated set so isDeleted is O(1)
+        // (PERF-0006, WRK-031). Safe to keep the memtable entry on a later
+        // error since a stale tombstone is a no-op when the doc is absent.
+        try self.all_tombstones.put(self.allocator, doc_id, {});
 
         const rec = wal.WalRecord{
             .record_type = .delete_doc,

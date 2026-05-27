@@ -62,11 +62,10 @@ pub const TermIterator = struct {
     }
 
     fn isDeleted(self: *TermIterator, doc_id: u64) bool {
-        if (self.eng.memtable.tombstones.contains(doc_id)) return true;
-        for (self.eng.segments.items) |seg| {
-            if (seg.tombstones.contains(doc_id)) return true;
-        }
-        return false;
+        // O(1) via the engine-aggregated tombstone set rather than scanning
+        // every segment per yielded doc (PERF-0006, WRK-031). The aggregated
+        // set is kept consistent in Engine.init, deleteDocument, and flush.
+        return self.eng.all_tombstones.contains(doc_id);
     }
 
     pub fn next(self: *TermIterator) !?Match {
