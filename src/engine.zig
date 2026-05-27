@@ -105,6 +105,33 @@ pub const Engine = struct {
     /// append that follows provides the durability boundary.
     next_txn_id: std.atomic.Value(u64) = .{ .raw = 1 },
 
+    /// Engine-wide reader/writer lock. Phase B2 of the concurrency-model
+    /// decision (PERF-0009, see `docs/concurrency-model-decision.md`).
+    /// Mutating methods take `lockUncancelable`; query-side methods take
+    /// `lockSharedUncancelable`. Allows any number of concurrent reader
+    /// threads to call `TermIterator.init` / `next` while no writer is
+    /// active. This is an interim contract — a future RCU-style snapshot
+    /// publication will let readers proceed entirely lock-free; until
+    /// then the rw-lock is the simplest sound primitive (Io.RwLock is
+    /// stdlib).
+    ///
+    /// Held SHARED for the lifetime of an active TermIterator (so the
+    /// underlying segments / memtable / norms / tombstones references the
+    /// iterator captured at init() time remain valid). Writers block
+    /// while a TermIterator is alive — this is the intended trade-off
+    /// for v0.1 correctness; long-running queries should batch results.
+    rw_lock: std.Io.RwLock = std.Io.RwLock.init,
+
+    /// Optional bg-flush thread. Phase B5 (PERF-0010): `flushAsync` spawns
+    /// a worker that calls `flush()` under the rw-lock. Caller can do
+    /// non-engine CPU work in parallel; any concurrent engine call
+    /// blocks on the rw-lock until the worker finishes. Joined in
+    /// `flushWait` or `deinit`. Null when no async flush is in flight.
+    pending_flush: ?std.Thread = null,
+    /// Captures the bg-flush worker's error so the caller's `flushWait`
+    /// can propagate it. Read after `pending_flush.?.join()` returns.
+    pending_flush_err: ?anyerror = null,
+
     /// Optional HMAC-SHA256 key for WAL + manifest envelopes (SEC-02,
     /// SEC-EXT-0401, GAP-0027). Null = unchanged on-disk format. Caller owns
     /// the key memory; the engine merely borrows the slice.
@@ -387,6 +414,15 @@ pub const Engine = struct {
 
     pub fn deinit(self: *Engine) void {
         self.assertOwnedByCurrentThread();
+        // Phase B5 (PERF-0010): join any in-flight bg-flush worker so the
+        // engine is quiescent before we tear state down. Errors are
+        // swallowed here — deinit is best-effort cleanup and the worker's
+        // error is also captured in pending_flush_err for callers that did
+        // not flushWait().
+        if (self.pending_flush) |thr| {
+            thr.join();
+            self.pending_flush = null;
+        }
         self.wal_writer.deinit();
         self.wal_file.close(self.io);
         self.wal_dir.close(self.io);
@@ -657,7 +693,14 @@ pub const Engine = struct {
     }
 
     pub fn indexDocument(self: *Engine, doc_id: u64, terms: []const TermPosting) !void {
+        // Phase B2: acquire writer lock; multi-reader/single-writer guarantees
+        // search-side iterators see consistent engine state for their full
+        // lifetime. SEC-EXT-0701 thread-ownership assertion remains in place
+        // — the lock allows multi-thread READS, but writes still flow through
+        // the owning thread by contract.
         self.assertOwnedByCurrentThread();
+        self.rw_lock.lockUncancelable(self.io);
+        defer self.rw_lock.unlock(self.io);
         // Validate inputs at the API boundary before any side effects
         // (SEC-EXT-0101, 0102, 0103, 0104, 0105, 0107, 0205, 0208).
         for (terms) |t| {
@@ -758,7 +801,9 @@ pub const Engine = struct {
         // behavior (SEC-EXT-0702). The threshold is currently a compile-time
         // constant; configurable per-engine threshold is deferred.
         if (self.memtable.total_docs >= limits.DEFAULT_MEMTABLE_FLUSH_THRESHOLD_DOCS) {
-            try self.flush();
+            // We already hold the writer lock; use the locked variant to
+            // avoid recursive acquisition (Io.RwLock is non-reentrant).
+            try self.flushLocked();
         }
     }
 
@@ -780,6 +825,8 @@ pub const Engine = struct {
     /// leaves the engine state unchanged.
     pub fn indexDocumentBatch(self: *Engine, docs: []const DocBatch) !void {
         self.assertOwnedByCurrentThread();
+        self.rw_lock.lockUncancelable(self.io);
+        defer self.rw_lock.unlock(self.io);
         if (docs.len == 0) return;
 
         // Validate every doc's inputs up-front so a malformed entry deep in
@@ -871,12 +918,16 @@ pub const Engine = struct {
         // matches the prior per-doc check semantics for any reasonable
         // batch size.
         if (self.memtable.total_docs >= limits.DEFAULT_MEMTABLE_FLUSH_THRESHOLD_DOCS) {
-            try self.flush();
+            // We already hold the writer lock; use the locked variant to
+            // avoid recursive acquisition (Io.RwLock is non-reentrant).
+            try self.flushLocked();
         }
     }
 
     pub fn deleteDocument(self: *Engine, doc_id: u64) !void {
         self.assertOwnedByCurrentThread();
+        self.rw_lock.lockUncancelable(self.io);
+        defer self.rw_lock.unlock(self.io);
         // Atomic claim (Phase B1).
         const txn_id = self.next_txn_id.fetchAdd(1, .monotonic);
 
@@ -915,12 +966,25 @@ pub const Engine = struct {
         // bump total_docs but a delete that follows a burst of indexing may
         // push us over the threshold here.
         if (self.memtable.total_docs >= limits.DEFAULT_MEMTABLE_FLUSH_THRESHOLD_DOCS) {
-            try self.flush();
+            // We already hold the writer lock; use the locked variant to
+            // avoid recursive acquisition (Io.RwLock is non-reentrant).
+            try self.flushLocked();
         }
     }
 
     pub fn flush(self: *Engine) !void {
         self.assertOwnedByCurrentThread();
+        self.rw_lock.lockUncancelable(self.io);
+        defer self.rw_lock.unlock(self.io);
+        return self.flushLocked();
+    }
+
+    /// `flush()` minus the lock — internal entry called by code paths that
+    /// already hold `self.rw_lock` (indexDocument auto-flush, bg-flush
+    /// worker). Io.RwLock does not support recursive acquisition, so callers
+    /// MUST hold the writer lock; callers that don't go through `flush()`
+    /// instead.
+    fn flushLocked(self: *Engine) !void {
         if (self.memtable.dictionary.count() == 0 and self.memtable.tombstones.count() == 0) return;
 
         const next_segment_id = self.current_manifest.counter + 1;
@@ -1074,6 +1138,52 @@ pub const Engine = struct {
         self.memtable = segment.Memtable.init(self.allocator);
     }
 
+    /// Background-flush entry point. Phase B5 (PERF-0010): kicks off a
+    /// worker thread that runs `flush()` and returns immediately. The
+    /// caller can continue with non-engine CPU work; any other engine
+    /// call (read or write) blocks on the rw-lock until the worker
+    /// finishes. Use `flushWait` to join the worker and surface its
+    /// error, or `deinit` (which auto-joins).
+    ///
+    /// Errors are deferred to the join point. If a previous `flushAsync`
+    /// is still in flight, the call blocks waiting for it (queue-of-one
+    /// semantics — keeps the API simple at v0.1).
+    pub fn flushAsync(self: *Engine) !void {
+        self.assertOwnedByCurrentThread();
+        // Drain any prior worker before starting a new one.
+        try self.flushWait();
+        const thread = try std.Thread.spawn(.{}, flushWorker, .{self});
+        self.pending_flush = thread;
+    }
+
+    /// Join any in-flight `flushAsync` worker and propagate its error.
+    /// Safe to call even if no worker is active (no-op in that case).
+    pub fn flushWait(self: *Engine) !void {
+        self.assertOwnedByCurrentThread();
+        if (self.pending_flush) |thr| {
+            thr.join();
+            self.pending_flush = null;
+            if (self.pending_flush_err) |err| {
+                self.pending_flush_err = null;
+                return err;
+            }
+        }
+    }
+
+    /// Worker entry-point for flushAsync. Runs on a spawned std.Thread —
+    /// NOT the owning thread, so it must bypass `assertOwnedByCurrentThread`
+    /// by going through the locked path directly. The rw-lock provides the
+    /// happens-before guarantee for the engine state mutation.
+    fn flushWorker(self: *Engine) void {
+        // Take the writer lock so reader threads see a consistent
+        // engine state for the duration of the flush.
+        self.rw_lock.lockUncancelable(self.io);
+        defer self.rw_lock.unlock(self.io);
+        self.flushLocked() catch |err| {
+            self.pending_flush_err = err;
+        };
+    }
+
     /// Manually merge every existing segment into one. Tombstoned docs are
     /// folded into the merged segment by exclusion (they simply don't appear
     /// in any posting list of the new segment), so the engine-wide tombstone
@@ -1088,6 +1198,8 @@ pub const Engine = struct {
     /// No-op if fewer than 2 segments exist.
     pub fn compact(self: *Engine) !void {
         self.assertOwnedByCurrentThread();
+        self.rw_lock.lockUncancelable(self.io);
+        defer self.rw_lock.unlock(self.io);
         if (self.segments.items.len <= 1) return;
 
         // Build a fresh in-memory memtable holding every (term, doc_id,
@@ -1253,6 +1365,57 @@ test "Engine index, flush, and recover" {
         try std.testing.expectEqual(@as(usize, 1), eng3.memtable.dictionary.count());
         try std.testing.expect(eng3.memtable.dictionary.contains("test"));
     }
+}
+
+test "Engine.flushAsync — bg-flush worker produces same on-disk state as flush" {
+    // Phase B5 (PERF-0010). The worker runs flush() on a spawned thread,
+    // so the rw-lock is the synchronization boundary. After flushWait the
+    // engine state must match a direct flush() call: one segment, empty
+    // memtable, manifest counter bumped.
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var eng = try Engine.init(io, alloc, tmp_dir.dir);
+    defer eng.deinit();
+
+    const t = TermPosting{ .term = "async_flush", .positions = &[_]u32{0} };
+    try eng.indexDocument(1, &[_]TermPosting{t});
+    try eng.indexDocument(2, &[_]TermPosting{t});
+
+    try eng.flushAsync();
+    try eng.flushWait();
+
+    try std.testing.expectEqual(@as(usize, 1), eng.segments.items.len);
+    try std.testing.expectEqual(@as(usize, 0), eng.memtable.dictionary.count());
+    try std.testing.expectEqual(@as(u64, 1), eng.current_manifest.counter);
+}
+
+test "Engine.flushAsync — back-to-back calls auto-drain the prior worker" {
+    // flushAsync's contract: 'queue-of-one' — calling it while a prior
+    // worker is in flight blocks until that worker finishes before
+    // spawning a new one. We index, fire flushAsync twice without a
+    // flushWait between, then verify the engine ends in a consistent
+    // state with both worker spawns drained on deinit.
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var eng = try Engine.init(io, alloc, tmp_dir.dir);
+    defer eng.deinit();
+
+    const t = TermPosting{ .term = "drain", .positions = &[_]u32{0} };
+    try eng.indexDocument(1, &[_]TermPosting{t});
+    try eng.flushAsync();
+    // Second flushAsync drains the first worker (queue-of-one). Memtable
+    // is empty so the actual flush is a no-op (counter stays unchanged).
+    try eng.flushAsync();
+    try eng.flushWait();
+
+    try std.testing.expectEqual(@as(usize, 1), eng.segments.items.len);
+    try std.testing.expectEqual(@as(u64, 1), eng.current_manifest.counter);
 }
 
 test "Engine.indexDocumentBatch — 64-doc batch matches per-doc semantics" {

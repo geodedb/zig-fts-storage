@@ -112,6 +112,15 @@ pub const TermIterator = struct {
         if (term.len == 0) return error.EmptyTerm;
         if (term.len > limits.MAX_TERM_LEN) return error.TermTooLong;
 
+        // Phase B2 (PERF-0009): grab the engine's rw-lock shared. Held for
+        // the iterator's lifetime so segments/memtable/norms references
+        // captured below stay valid as long as next() may be called. Writers
+        // block while ANY iterator is alive — coarse but correct; the
+        // RCU-snapshot refinement is scoped as a follow-up. Released in
+        // TermIterator.deinit.
+        eng.rw_lock.lockSharedUncancelable(eng.io);
+        errdefer eng.rw_lock.unlockShared(eng.io);
+
         var seg_iters: std.ArrayListUnmanaged(segment.SegmentReader.PostingIterator) = .empty;
         errdefer {
             for (seg_iters.items) |*iter| iter.deinit();
@@ -162,6 +171,9 @@ pub const TermIterator = struct {
         }
         self.seg_iters.deinit(self.allocator);
         self.seg_refs.deinit(self.allocator);
+        // Release the engine reader lock acquired in init/initWithAuth
+        // (Phase B2, PERF-0009).
+        self.eng.rw_lock.unlockShared(self.eng.io);
     }
 
     fn isDeleted(self: *TermIterator, doc_id: u64) bool {
