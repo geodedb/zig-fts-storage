@@ -217,6 +217,14 @@ pub const Engine = struct {
         errdefer engine.all_tombstones.deinit(allocator);
         engine.all_norms = .empty;
         errdefer engine.all_norms.deinit(allocator);
+        // Field-default initializers are NOT applied by allocator.create();
+        // we must explicitly init every field, including atomics and locks.
+        // Without this, rw_lock starts with garbage state and lockUncancelable
+        // futex-waits forever on a fake "writer-active" bit (Phase B2).
+        engine.next_txn_id = .{ .raw = 1 };
+        engine.rw_lock = std.Io.RwLock.init;
+        engine.pending_flush = null;
+        engine.pending_flush_err = null;
 
         // Ensure subdirectories exist. Dir mode 0o700 (owner-only) keeps the
         // WAL and segment data unreadable to other local users on POSIX
