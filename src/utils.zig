@@ -226,6 +226,24 @@ pub fn aeadDecrypt(
 /// - `errdefer` removes the tmp on any failure before rename completes.
 /// - Rename is the durability point; we do not attempt a parent-dir fsync
 ///   because `std.Io.Dir` does not expose one in Zig 0.16.
+///
+/// Cross-platform semantics (QUAL-0028):
+/// - **Linux / macOS / other POSIX:** `rename(2)` is atomic with respect to
+///   readers — concurrent opens see either the old file or the new one,
+///   never a partial write. Crash recovery: after fsync of the tmp, the
+///   rename either lands or it doesn't; in both cases the on-disk state is
+///   consistent. The lack of a parent-dir fsync means a crash *immediately*
+///   after the rename returns can lose the rename itself on some
+///   filesystems (ext4 default `data=ordered` mostly mitigates this; XFS
+///   needs an explicit dirsync). Acceptable for v0.1 because the WAL is
+///   the durability source of truth and manifest replay is idempotent.
+/// - **Windows:** `MoveFileExW` / `ReplaceFileW` semantics. `std.Io.Dir.rename`
+///   maps onto Win32 atomic replace where supported (NTFS, ReFS), which is
+///   atomic w.r.t. other processes that open with `FILE_SHARE_*` flags.
+///   FAT32 / network mounts may not provide atomicity. The same `errdefer
+///   delete tmp` cleanup applies. Windows is **not** in the CI matrix today;
+///   semantics above are based on the documented stdlib contract, not on a
+///   passing CI run. A Windows job is a follow-up.
 pub fn atomicWrite(io: std.Io, dir: std.Io.Dir, path: []const u8, data: []const u8) !void {
     var rand_bytes: [8]u8 = undefined;
     io.random(&rand_bytes);

@@ -83,7 +83,16 @@ pub const ResultRow = struct {
     alloc_count: u64,
     alloc_bytes: u64,
     peak_live_bytes: u64,
+    /// Process RSS at sample time, in bytes. Sourced from
+    /// `/proc/self/status` on Linux; **emitted as 0 on every non-Linux
+    /// host** (Darwin, Windows, BSDs) because no equivalent stdlib-only
+    /// fast read exists yet. Consumers comparing across OSes must treat
+    /// `rss_current_bytes == 0` and `rss_peak_bytes == 0` as
+    /// "unavailable", not as "zero memory used" (QUAL-0027). Linux-vs-
+    /// Linux diffs are fine.
     rss_current_bytes: u64,
+    /// Peak process RSS observed. Same Linux-only caveat as
+    /// `rss_current_bytes` above (QUAL-0027).
     rss_peak_bytes: u64,
 };
 
