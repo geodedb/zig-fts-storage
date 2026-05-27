@@ -248,14 +248,25 @@ pub fn build(b: *std.Build) void {
     const micro_example_step = b.step("bench-micro-example", "Example micro-benchmark");
     micro_example_step.dependOn(&run_micro_example.step);
 
+    const micro_varint_exe = b.addExecutable(.{
+        .name = "fts-storage-micro-varint",
+        .root_module = benchModule(b, "benchmarks/micro/varint.zig", target, bench_lib_module, framework_module),
+    });
+    const run_micro_varint = b.addRunArtifact(micro_varint_exe);
+    if (b.args) |args| run_micro_varint.addArgs(args);
+    const micro_varint_step = b.step("bench-micro-varint", "Varint encode/decode micro-benchmarks");
+    micro_varint_step.dependOn(&run_micro_varint.step);
+
     const micro_all_step = b.step("bench-micro", "Run all micro-benchmarks");
     micro_all_step.dependOn(&run_micro_example.step);
+    micro_all_step.dependOn(&run_micro_varint.step);
 
     const tools_step = b.step("tools", "Build benchmark tooling artifacts");
     tools_step.dependOn(&bench_exe.step);
     tools_step.dependOn(&scale_bench_exe.step);
     tools_step.dependOn(&compare_bench_exe.step);
     tools_step.dependOn(&micro_example_exe.step);
+    tools_step.dependOn(&micro_varint_exe.step);
 }
 
 fn benchModule(
