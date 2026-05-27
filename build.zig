@@ -257,9 +257,19 @@ pub fn build(b: *std.Build) void {
     const micro_varint_step = b.step("bench-micro-varint", "Varint encode/decode micro-benchmarks");
     micro_varint_step.dependOn(&run_micro_varint.step);
 
+    const micro_bm25_exe = b.addExecutable(.{
+        .name = "fts-storage-micro-bm25",
+        .root_module = benchModule(b, "benchmarks/micro/bm25.zig", target, bench_lib_module, framework_module),
+    });
+    const run_micro_bm25 = b.addRunArtifact(micro_bm25_exe);
+    if (b.args) |args| run_micro_bm25.addArgs(args);
+    const micro_bm25_step = b.step("bench-micro-bm25", "BM25 scoring micro-benchmarks");
+    micro_bm25_step.dependOn(&run_micro_bm25.step);
+
     const micro_all_step = b.step("bench-micro", "Run all micro-benchmarks");
     micro_all_step.dependOn(&run_micro_example.step);
     micro_all_step.dependOn(&run_micro_varint.step);
+    micro_all_step.dependOn(&run_micro_bm25.step);
 
     const tools_step = b.step("tools", "Build benchmark tooling artifacts");
     tools_step.dependOn(&bench_exe.step);
@@ -267,6 +277,7 @@ pub fn build(b: *std.Build) void {
     tools_step.dependOn(&compare_bench_exe.step);
     tools_step.dependOn(&micro_example_exe.step);
     tools_step.dependOn(&micro_varint_exe.step);
+    tools_step.dependOn(&micro_bm25_exe.step);
 }
 
 fn benchModule(
