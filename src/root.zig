@@ -65,6 +65,10 @@ pub const Engine = engine.Engine;
 /// A single (term, positions) pair handed to `Engine.indexDocument`.
 pub const TermPosting = engine.TermPosting;
 
+/// A (doc_id, terms) pair handed to `Engine.indexDocumentBatch`. The batch
+/// API amortizes one fsync across the whole batch (PERF-0001, Phase B3).
+pub const DocBatch = engine.DocBatch;
+
 /// A streaming iterator over (doc_id, positions) matches for a search term.
 pub const TermIterator = search.TermIterator;
 

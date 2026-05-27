@@ -21,6 +21,28 @@ pub const TermPosting = struct {
     field: ?[]const u8 = null,
 };
 
+/// One unit of work for `Engine.indexDocumentBatch` — a doc_id and its
+/// terms, identical in shape to a single `indexDocument` call.
+///
+/// PERF-0001 / Phase B3: `indexDocumentBatch` writes every record in the
+/// batch to the WAL without intervening fsyncs and issues exactly ONE
+/// fsync at the end. Throughput on an fsync-bound disk scales near-linearly
+/// with batch size up to the disk's IO queue depth. Concrete numbers from
+/// the bench-coverage-expansion baselines (2026-05-27): a 64-record batch
+/// amortizes one ~5 ms fsync across 64 docs, giving an ~12 800 docs/s
+/// ceiling vs the per-record 186 docs/s ceiling — a ~69x gain when the
+/// caller is in a position to batch.
+///
+/// Crash semantics are unchanged: each (doc_id, terms) entry is still
+/// bracketed with BEGIN / COMMIT WAL records sharing one txn_id, so a
+/// crash mid-batch leaves the WAL with whatever records were durable at
+/// the moment fsync returned (zero of them, if the crash preceded fsync;
+/// all of them, otherwise). Partial-batch durability is not exposed.
+pub const DocBatch = struct {
+    doc_id: u64,
+    terms: []const TermPosting,
+};
+
 /// Opt-in security knobs for `Engine.initWithConfig`. Every field defaults to
 /// the pre-WRK-037 / WRK-038 behavior so existing callers, on-disk layouts,
 /// and unit tests continue to work unchanged.
@@ -740,6 +762,119 @@ pub const Engine = struct {
         }
     }
 
+    /// Index a batch of (doc_id, terms) pairs with a single trailing fsync.
+    ///
+    /// PERF-0001 / Phase B3: the dominant cost on the indexing hot path is
+    /// the per-record `fsync` (the bench baseline at HEAD `9159059` shows
+    /// 186 docs/s with one fsync per doc on znver2 / linux / ext4). This
+    /// method amortizes a single fsync across every record in the batch,
+    /// lifting the ceiling to roughly (batch_size * single-doc-throughput)
+    /// up to the disk's IO queue depth.
+    ///
+    /// Each `DocBatch` entry receives the same BEGIN / payload / COMMIT
+    /// bracketing as a single `indexDocument` call, so replay's
+    /// "apply only if matching COMMIT observed" rule is preserved. A crash
+    /// before the final `sync()` returns means none of the records in the
+    /// batch are durable; after `sync()` returns, all of them are. The
+    /// memtable is mutated only after `sync()` succeeds, so a sync failure
+    /// leaves the engine state unchanged.
+    pub fn indexDocumentBatch(self: *Engine, docs: []const DocBatch) !void {
+        self.assertOwnedByCurrentThread();
+        if (docs.len == 0) return;
+
+        // Validate every doc's inputs up-front so a malformed entry deep in
+        // the batch does not leave a partial WAL prefix on disk before the
+        // final sync. Same checks as `indexDocument`.
+        for (docs) |d| {
+            for (d.terms) |t| {
+                if (t.term.len == 0) return error.EmptyTerm;
+                if (t.term.len > limits.MAX_TERM_LEN) return error.TermTooLong;
+                if (t.positions.len > limits.MAX_POSITIONS_PER_TERM) return error.PositionCountTooLarge;
+                var i: usize = 1;
+                while (i < t.positions.len) : (i += 1) {
+                    if (t.positions[i] < t.positions[i - 1]) return error.PositionsNotMonotonic;
+                }
+            }
+        }
+
+        // Reuse one payload buffer across the whole batch. Estimate
+        // upper-bound capacity to avoid repeated reallocation on append.
+        var payload_list: std.ArrayListUnmanaged(u8) = .empty;
+        defer payload_list.deinit(self.allocator);
+        var max_estimated: usize = 0;
+        for (docs) |d| {
+            var per_doc: usize = 0;
+            for (d.terms) |t| per_doc += 4 + t.term.len + (t.positions.len * 5);
+            if (per_doc > max_estimated) max_estimated = per_doc;
+        }
+        try payload_list.ensureTotalCapacity(self.allocator, max_estimated);
+
+        // First pass: claim txn_ids and append every WAL record. No sync.
+        // We claim ids in a tight loop up front so the WAL is densely
+        // packed with the batch's records.
+        var num_buf: [4]u8 = undefined;
+        for (docs) |d| {
+            const txn_id = self.next_txn_id.fetchAdd(1, .monotonic);
+
+            payload_list.clearRetainingCapacity();
+            for (d.terms) |t| {
+                const term_len_u16 = std.math.cast(u16, t.term.len) orelse return error.TermTooLong;
+                std.mem.writeInt(u16, num_buf[0..2], term_len_u16, .little);
+                try payload_list.appendSlice(self.allocator, num_buf[0..2]);
+                try payload_list.appendSlice(self.allocator, t.term);
+
+                const pos_len_u16 = std.math.cast(u16, t.positions.len) orelse return error.PositionCountTooLarge;
+                std.mem.writeInt(u16, num_buf[0..2], pos_len_u16, .little);
+                try payload_list.appendSlice(self.allocator, num_buf[0..2]);
+
+                for (t.positions) |p| {
+                    var vbuf: [10]u8 = undefined;
+                    const written = try utils.writeVarInt(&vbuf, p);
+                    try payload_list.appendSlice(self.allocator, vbuf[0..written]);
+                }
+            }
+
+            try self.wal_writer.append(.{
+                .record_type = .begin,
+                .txn_id = txn_id,
+                .doc_id = 0,
+                .payload = "",
+            });
+            try self.wal_writer.append(.{
+                .record_type = .index_doc,
+                .txn_id = txn_id,
+                .doc_id = d.doc_id,
+                .payload = payload_list.items,
+            });
+            try self.wal_writer.append(.{
+                .record_type = .commit,
+                .txn_id = txn_id,
+                .doc_id = 0,
+                .payload = "",
+            });
+        }
+
+        // ONE fsync covering the whole batch — the entire performance win.
+        try self.wal_writer.sync();
+
+        // Now mutate the memtable for every doc. WAL is already durable;
+        // failures here cannot diverge replay from on-disk state because
+        // every doc's COMMIT was already written and synced.
+        for (docs) |d| {
+            for (d.terms) |t| {
+                try self.memtable.addPosting(t.term, d.doc_id, t.positions);
+            }
+        }
+
+        // Auto-flush once if the batch pushed the memtable past the
+        // threshold (SEC-EXT-0702). Single check at the end of the batch
+        // matches the prior per-doc check semantics for any reasonable
+        // batch size.
+        if (self.memtable.total_docs >= limits.DEFAULT_MEMTABLE_FLUSH_THRESHOLD_DOCS) {
+            try self.flush();
+        }
+    }
+
     pub fn deleteDocument(self: *Engine, doc_id: u64) !void {
         self.assertOwnedByCurrentThread();
         // Atomic claim (Phase B1).
@@ -1116,6 +1251,97 @@ test "Engine index, flush, and recover" {
         try std.testing.expectEqual(@as(usize, 1), eng3.memtable.dictionary.count());
         try std.testing.expect(eng3.memtable.dictionary.contains("test"));
     }
+}
+
+test "Engine.indexDocumentBatch — 64-doc batch matches per-doc semantics" {
+    // Phase B3 group-commit gate. Pins three properties:
+    //   1. After indexDocumentBatch, every doc in the batch is searchable.
+    //   2. txn_id allocation is monotonic across the batch.
+    //   3. A re-open replays the entire batch identically to N independent
+    //      indexDocument calls — same memtable, same dictionary, same set of
+    //      doc_ids visible to search.
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    const N: usize = 64;
+    {
+        var eng = try Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+
+        const txn_before = eng.next_txn_id.load(.monotonic);
+
+        var docs_buf: [N]DocBatch = undefined;
+        const positions = [_]u32{ 0, 1 };
+        // Per-doc TermPosting array — share `term` slice across docs because
+        // the engine copies on insert.
+        var term_buf: [N]TermPosting = undefined;
+        var i: usize = 0;
+        while (i < N) : (i += 1) {
+            term_buf[i] = .{ .term = "batch", .positions = &positions };
+            docs_buf[i] = .{ .doc_id = 100 + i, .terms = term_buf[i .. i + 1] };
+        }
+        try eng.indexDocumentBatch(&docs_buf);
+
+        try std.testing.expectEqual(txn_before + N, eng.next_txn_id.load(.monotonic));
+
+        // Every doc must be searchable in the memtable.
+        try std.testing.expect(eng.memtable.dictionary.contains("batch"));
+        const list = eng.memtable.dictionary.get("batch").?;
+        try std.testing.expectEqual(@as(u64, N), list.df);
+    }
+
+    {
+        // Re-open: WAL replay must yield the same memtable state.
+        var eng2 = try Engine.init(io, alloc, tmp_dir.dir);
+        defer eng2.deinit();
+        try std.testing.expect(eng2.memtable.dictionary.contains("batch"));
+        const list = eng2.memtable.dictionary.get("batch").?;
+        try std.testing.expectEqual(@as(u64, N), list.df);
+        // next_txn_id picks up where the batch left off (no gaps, all
+        // bracketed by matching COMMIT records, so all were applied).
+        try std.testing.expectEqual(@as(u64, N + 1), eng2.next_txn_id.load(.monotonic));
+    }
+}
+
+test "Engine.indexDocumentBatch — empty batch is a no-op" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var eng = try Engine.init(io, alloc, tmp_dir.dir);
+    defer eng.deinit();
+    const txn_before = eng.next_txn_id.load(.monotonic);
+    try eng.indexDocumentBatch(&[_]DocBatch{});
+    try std.testing.expectEqual(txn_before, eng.next_txn_id.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 0), eng.memtable.total_docs);
+}
+
+test "Engine.indexDocumentBatch — invalid doc rejects whole batch" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var eng = try Engine.init(io, alloc, tmp_dir.dir);
+    defer eng.deinit();
+    const txn_before = eng.next_txn_id.load(.monotonic);
+
+    const good_pos = [_]u32{0};
+    const bad_pos = [_]u32{ 2, 1 }; // not monotonic
+    const t_good = TermPosting{ .term = "good", .positions = &good_pos };
+    const t_bad = TermPosting{ .term = "bad", .positions = &bad_pos };
+    const docs = [_]DocBatch{
+        .{ .doc_id = 1, .terms = &[_]TermPosting{t_good} },
+        .{ .doc_id = 2, .terms = &[_]TermPosting{t_bad} }, // poisons whole batch
+    };
+    try std.testing.expectError(error.PositionsNotMonotonic, eng.indexDocumentBatch(&docs));
+
+    // No txn_ids consumed, no memtable mutation, no WAL records appended.
+    try std.testing.expectEqual(txn_before, eng.next_txn_id.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 0), eng.memtable.total_docs);
 }
 
 test "Engine.all_norms aggregates across segments" {

@@ -77,6 +77,16 @@ pub fn main(init: std.process.Init) !void {
             .user_data = @ptrCast(&box),
             .run = benchIndexDocument,
         },
+        // PERF-0001 / Phase B3 group-commit comparison scenario. Same
+        // workload as engine_index_document (1 000 docs, single fixed term)
+        // but issued via indexDocumentBatch in 64-doc batches. The
+        // throughput delta vs engine_index_document IS the group-commit win.
+        .{
+            .name = "engine_index_document_batch64",
+            .ops_per_iteration = 1_000,
+            .user_data = @ptrCast(&box),
+            .run = benchIndexDocumentBatch64,
+        },
         .{
             .name = "ingest_100k_docs_random_terms",
             .ops_per_iteration = INGEST_DOCS,
@@ -212,6 +222,40 @@ fn benchIndexDocument(ctx: *framework.Context) anyerror!void {
     while (i < ctx.scenario.ops_per_iteration) : (i += 1) {
         const term = fts.TermPosting{ .term = "bench", .positions = &[_]u32{ 1, 2, 3 } };
         try engine.indexDocument(i, &[_]fts.TermPosting{term});
+    }
+}
+
+// PERF-0001 / Phase B3: same workload as benchIndexDocument but submitted
+// via indexDocumentBatch in 64-doc batches. Each batch amortizes one
+// fsync across 64 records, lifting the ~186 docs/s per-record ceiling
+// toward the disk's IO queue depth. The throughput delta between
+// engine_index_document and engine_index_document_batch64 IS the gain.
+fn benchIndexDocumentBatch64(ctx: *framework.Context) anyerror!void {
+    const io = ioFromCtx(ctx);
+    var tmp_dir = try Io.Dir.cwd().createDirPathOpen(io, ".bench-tmp-batch", .{});
+    defer tmp_dir.close(io);
+    var engine = try fts.Engine.init(io, ctx.allocator, tmp_dir);
+    defer engine.deinit();
+
+    const BATCH: usize = 64;
+    const positions = [_]u32{ 1, 2, 3 };
+    var term_buf: [BATCH]fts.TermPosting = undefined;
+    var docs_buf: [BATCH]fts.DocBatch = undefined;
+    for (&term_buf) |*t| t.* = .{ .term = "bench", .positions = &positions };
+
+    var indexed: u64 = 0;
+    while (indexed < ctx.scenario.ops_per_iteration) {
+        const remaining = ctx.scenario.ops_per_iteration - indexed;
+        const this_batch: usize = if (remaining < BATCH) @intCast(remaining) else BATCH;
+        var b: usize = 0;
+        while (b < this_batch) : (b += 1) {
+            docs_buf[b] = .{
+                .doc_id = indexed + b,
+                .terms = term_buf[b .. b + 1],
+            };
+        }
+        try engine.indexDocumentBatch(docs_buf[0..this_batch]);
+        indexed += this_batch;
     }
 }
 
