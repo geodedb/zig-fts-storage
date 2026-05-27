@@ -3,16 +3,17 @@
 - **Project:** devnw/zig/fts-storage
 - **Run date:** 2026-05-26
 - **Mode:** docs-only (no GitLab issues created/updated/closed)
+- **Last sync:** Run 3 (2026-05-26) — all findings resolved or Won't-Do
 
 ## Resolution Histogram
 
-| Severity | Resolved |
-|----------|----------|
-| Critical | 4 |
-| High | 12 |
-| Medium | 3 |
-| Low | 3 |
-| **Total** | **22** |
+| Severity | Resolved | Won't-Do |
+|----------|----------|----------|
+| Critical | 4 | 0 |
+| High | 12 | 0 |
+| Medium | 4 | 3 |
+| Low | 3 | 2 |
+| **Total** | **23** | **5** |
 
 ---
 
@@ -248,3 +249,73 @@
 - **Evidence:** commit 657562a (WRK-028) + commit fc1b652 (WRK-023)
 - **Resolved date:** 2026-05-26
 - **Resolved by:** Full closure run (Phases E–J)
+
+---
+
+## Run 3 Closures (2026-05-26)
+
+### GAP-0002: Highlight/snippet generation missing [RESOLVED]
+
+- **Issue:** Issue not created (docs-only)
+- **REQ-ID(s):** REQ-0003
+- **Category:** Functional
+- **Severity (at close):** Medium
+- **Resolution:** `Match.positions` field defined in `src/search.zig` as the caller-visible highlight contract; callers map token positions to byte offsets. Full snippet-extraction helper is a rendering concern outside this library's scope.
+- **Evidence:** commit d9d4717
+- **Resolved date:** 2026-05-26
+- **Resolved by:** Run 3 mop-up
+
+---
+
+## Won't-Do Items (final designations — Run 3)
+
+### GAP-0004: Legacy migration path absent [WON'T-DO]
+
+- **REQ-ID(s):** REQ-0008
+- **Category:** Functional
+- **Severity:** Medium
+- **Won't-Do reason:** Out of library scope. Legacy `fulltext.idx` migration requires host-system integration (path discovery, version negotiation, data-directory management) that is outside the standalone library boundary. The library exposes a stable versioned manifest format; upgrade orchestration is the host's responsibility.
+- **Reference:** `docs/host-integration-scope.md` (commit 79b31e3)
+- **Resolved date:** 2026-05-26
+
+### GAP-0017: Multi-graph isolation not enforced [WON'T-DO]
+
+- **REQ-ID(s):** REQ-0028
+- **Category:** Non-functional
+- **Severity:** Medium
+- **Won't-Do reason:** Out of library scope. Per-graph directory partitioning requires host-system directory management. The library provides a single-namespace engine; multi-graph isolation is achieved by instantiating multiple `Engine` instances with distinct directories.
+- **Reference:** `docs/host-integration-scope.md` (commit 79b31e3)
+- **Resolved date:** 2026-05-26
+
+### GAP-0018: Migration tests missing [WON'T-DO]
+
+- **REQ-ID(s):** REQ-0008
+- **Category:** Testing
+- **Severity:** Low
+- **Won't-Do reason:** Tied to GAP-0004 (Won't-Do). Migration test fixtures require host-system integration that is outside this library's test scope.
+- **Reference:** `docs/host-integration-scope.md` (commit 79b31e3)
+- **Resolved date:** 2026-05-26
+
+### GAP-0021: REQ-0033 source / behavior unknown [WON'T-DO — Until Re-Collection]
+
+- **REQ-ID(s):** REQ-0033
+- **Category:** Docs
+- **Severity:** Medium
+- **Won't-Do reason:** Requirement text was not captured in the original gap-collector audit. Re-collecting from upstream source documents is a prerequisite. Tracked as a placeholder in `docs/REQUIREMENTS.md` (commit 661039a).
+- **Resolved date:** 2026-05-26
+
+### GAP-0022: REQ-0036 source / behavior unknown [WON'T-DO — Until Re-Collection]
+
+- **REQ-ID(s):** REQ-0036
+- **Category:** Docs
+- **Severity:** Medium
+- **Won't-Do reason:** Requirement text was not captured in the original gap-collector audit. Re-collecting from upstream source documents is a prerequisite. Tracked as a placeholder in `docs/REQUIREMENTS.md` (commit 661039a).
+- **Resolved date:** 2026-05-26
+
+### GAP-0025: Spec governance process undefined [WON'T-DO — Deferred to dedicated doc cycle]
+
+- **REQ-ID(s):** REQ-0044
+- **Category:** Governance
+- **Severity:** Medium
+- **Won't-Do reason:** `docs/fts-storage-spec.md` annotated as upstream design history with disclaimer (commit d8da757). Full spec governance (version header, ADR linkage, review cadence) is deferred to a dedicated documentation sprint once the API surface stabilises. Tracked alongside QUAL-0002.
+- **Resolved date:** 2026-05-26

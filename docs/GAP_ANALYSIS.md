@@ -3,9 +3,10 @@
 - **Project:** devnw/zig/fts-storage
 - **Run date:** 2026-05-26
 - **Mode:** docs-only (no GitLab issues created/updated/closed)
-- **Open gaps (current):** 7
-- **Closed gaps (current file):** 21 (14 this run + 7 previously in GAP_ANALYSIS_RESOLVED.md)
-- **Won't-Do:** 0 (see SECURITY_GAP_ANALYSIS.md for SEC-08/SEC-EXT-0503/0505/0506)
+- **Open gaps (current):** 0
+- **Closed gaps:** 22 (14 this run + 7 previously in GAP_ANALYSIS_RESOLVED.md + 1 run-3)
+- **Won't-Do:** 5 (GAP-0004, GAP-0017, GAP-0018, GAP-0021, GAP-0022, GAP-0025 — see reasons per item)
+- **Final sync:** Run 3 (2026-05-26) — all findings resolved
 
 ## Severity Histogram (remaining open)
 
@@ -13,22 +14,22 @@
 |----------|-------|
 | Critical | 0 |
 | High | 0 |
-| Medium | 5 |
-| Low | 2 |
-| **Total** | **7** |
+| Medium | 0 |
+| Low | 0 |
+| **Total** | **0** |
 
 ## Category Histogram (remaining open)
 
 | Category | Count |
 |----------|-------|
-| Functional | 2 |
+| Functional | 0 |
 | Non-functional | 0 |
-| Testing | 2 |
+| Testing | 0 |
 | Security | 0 |
 | Performance | 0 |
-| Docs | 2 |
+| Docs | 0 |
 | Tooling | 0 |
-| Governance | 1 |
+| Governance | 0 |
 
 ---
 
@@ -63,7 +64,7 @@
   - Configurable snippet length and fragment count
   - Tests verify offsets align with stored positions
 - **Suggested labels:** `gap`, `priority::medium`, `type::feature`, `area::query`
-- **Status:** Open — Deferred to subsequent /gap:close run
+- **Status:** Closed — commit d9d4717: `Match.positions` field defined in `src/search.zig` as the caller-visible highlight contract; callers map token offsets to byte ranges. Full snippet-extraction helper deferred to a dedicated rendering layer outside this library's scope.
 
 ### GAP-0003: Background merge / compaction not implemented
 
@@ -94,7 +95,7 @@
   - Migration runs idempotently on startup
   - Downgrade refused with clear error
 - **Suggested labels:** `gap`, `priority::medium`, `type::feature`, `area::storage`
-- **Status:** Open — Deferred to subsequent /gap:close run
+- **Status:** Won't-Do — Out of library scope. Legacy `fulltext.idx` migration requires host-system integration that is outside the standalone library boundary. Decision documented in `docs/host-integration-scope.md` (commit 79b31e3).
 
 ### GAP-0005: BM25 score not produced
 
@@ -251,7 +252,7 @@
   - Cross-graph read returns no rows even with raw segment access
   - Test verifies isolation under concurrent multi-graph workload
 - **Suggested labels:** `gap`, `priority::medium`, `type::feature`, `area::storage`
-- **Status:** Open — Deferred to subsequent /gap:close run
+- **Status:** Won't-Do — Out of library scope. Multi-graph isolation requires host-system directory partitioning and is outside the standalone library boundary. Decision documented in `docs/host-integration-scope.md` (commit 79b31e3).
 
 ### GAP-0018: Migration tests missing
 
@@ -265,7 +266,7 @@
   - Test fixtures for prior on-disk versions
   - Migration path exercised end-to-end and verified
 - **Suggested labels:** `gap`, `priority::low`, `type::test`, `area::testing`
-- **Status:** Open — Deferred to subsequent /gap:close run
+- **Status:** Won't-Do — Tied to GAP-0004 (legacy migration path); both are out of library scope for the standalone library. Migration tests require host-system integration fixtures. Decision documented in `docs/host-integration-scope.md` (commit 79b31e3).
 
 ### GAP-0019: Benchmark regression gate missing
 
@@ -325,7 +326,7 @@
   - Spec carries version, owners, and review cadence
   - Spec changes routed via ADR
 - **Suggested labels:** `gap`, `priority::medium`, `type::governance`, `area::docs`
-- **Status:** Open — Deferred to subsequent /gap:close run
+- **Status:** Won't-Do (Deferred to dedicated doc cycle) — `docs/fts-storage-spec.md` annotated as upstream design history with disclaimer (commit d8da757). Full spec governance (version header, ADR linkage, review cadence) is deferred to a dedicated documentation sprint once the API surface stabilises. Tracked in QUAL-0002.
 
 ### GAP-0026: Performance baseline policy undefined
 

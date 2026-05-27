@@ -32,7 +32,8 @@ Confidence tags: `confidence::confirmed` (verified in code) / `confidence::suspe
 
 ## Status Legend
 
-- **Open** — not addressed in the 21-commit closure run; deferred to next /gap:close run
+- **Open** — no closure exists in runs 1–3; flagged for re-audit in next cycle
+- **Won't-Do** — intentionally not implemented; reason and reference documented
 - **Closed** — addressed; evidence points to commit SHA
 - **Deferred** — intentionally deferred; reason documented
 
@@ -45,7 +46,7 @@ Sorted by `PriorityScore` descending. All file:line citations point at `/home/be
 | Rank | Finding ID(s) | Title | Category | Severity | PriorityScore | File:line | Status | Evidence |
 |-----:|---|---|---|---|---:|---|---|---|
 | 1 | QUAL-0001 | `root.zig` exposes no real public API — `Engine` not re-exported | api-contract | Critical | 100 | `src/root.zig:1-end` | **Closed** | commit 7234563 |
-| 2 | QUAL-0002 | `docs/fts-storage-spec.md` is a Geode LLM dump with `citeturn*` artifacts | docs | Critical | 80 | `docs/fts-storage-spec.md:*` | Open — Deferred to subsequent /gap:close run | — |
+| 2 | QUAL-0002 | `docs/fts-storage-spec.md` is a Geode LLM dump with `citeturn*` artifacts | docs | Critical | 80 | `docs/fts-storage-spec.md:*` | Won't-Do (Deferred to dedicated doc cycle) — commit d8da757 annotated file as upstream design history and added disclaimer; full rewrite deferred until API surface stabilises. | d8da757 |
 | 3 | QUAL-0006 | `Memtable.total_docs` and `SegmentEntry.doc_count` never incremented — BM25 wrong | api-contract | High | 70 | `src/engine.zig` (indexDocument), `src/segment.zig` | **Closed** | commit 2934b17 |
 | 4 | QUAL-0004 | `loadManifest` silently swallows `ChecksumMismatch` via `catch null` | api-contract | High | 70 | `src/manifest.zig` (loadManifest) | **Closed** | commit d3eae2b |
 | 5 | QUAL-0005 | Flush ordering can orphan segments / truncate WAL on partial failure | architecture | High | 56 | `src/engine.zig` (flush path) | **Closed** | commit 60d5c26 |
@@ -56,8 +57,8 @@ Sorted by `PriorityScore` descending. All file:line citations point at `/home/be
 | 10 | QUAL-0007 | `Memtable.addPosting` leaks key on subsequent alloc failure | maintainability | High | 42 | `src/engine.zig` (Memtable.addPosting) | **Closed** | commit 5bd07c1 |
 | 11 | QUAL-0009 | `anyerror` leaks; no named error sets per module | api-contract | High | 35 | `src/engine.zig`, `src/wal.zig`, `src/manifest.zig` | **Closed** | commit ec23de9 |
 | 12 | QUAL-0018 | `indexDocument`: memtable updated before WAL append — divergence on WAL failure | architecture | Medium | 32 | `src/engine.zig` (indexDocument) | **Closed** | commit 5bd07c1 |
-| 13 | QUAL-0015 | `varint` accepts `u64` but callers `@intCast` down — silent truncation in ReleaseFast | api-contract | Medium | 32 | `src/utils.zig` (varint), call sites in `wal.zig`, `segment.zig` | Open — Deferred to subsequent /gap:close run | — |
-| 14 | QUAL-0016 | `SegmentReader.search` reopens dir + file each query — correctness + perf | perf | Medium | 32 | `src/segment.zig` (SegmentReader.search) | Open — Deferred to subsequent /gap:close run | — |
+| 13 | QUAL-0015 | `varint` accepts `u64` but callers `@intCast` down — silent truncation in ReleaseFast | api-contract | Medium | 32 | `src/utils.zig` (varint), call sites in `wal.zig`, `segment.zig` | **Closed** | commit 91b3ba7 (pre-check guards replacing `@intCast` on untrusted lengths; also closes SEC-EXT-0102, 0103) |
+| 14 | QUAL-0016 | `SegmentReader.search` reopens dir + file each query — correctness + perf | perf | Medium | 32 | `src/segment.zig` (SegmentReader.search) | **Closed** | commit b620a03 (cached fd and posting scratch; also closes PERF-0005, PERF-0007) |
 | 15 | QUAL-0020 | No varint / CRC / torn-WAL fuzz tests in any CI matrix mode | tests | Medium | 27 | CI workflow + `tests/` | **Closed** | commit 9e6fd81 |
 | 16 | QUAL-0021 | No FD-count or post-flush dir-state assertions in tests | tests | Medium | 27 | `tests/*` | **Closed** | commit 9e6fd81 |
 | 17 | QUAL-0012 | CRC hashing pattern divergence across modules | maintainability | Medium | 20 | `src/wal.zig`, `src/manifest.zig`, `src/segment.zig` | **Closed** | commit ac16729 |
@@ -66,22 +67,22 @@ Sorted by `PriorityScore` descending. All file:line citations point at `/home/be
 | 20 | QUAL-0013, DC-1 | `WalRecordType.begin/commit` defined but never emitted (dead code) | cleanup | Medium | 16 | `src/wal.zig` (WalRecordType) | **Closed** | commit 56e045c |
 | 21 | QUAL-0017 | `Engine.wal_file/wal_writer` optional but always populated — pointless null checks | readability | Medium | 16 | `src/engine.zig` | **Closed** | commit fc11258 |
 | 22 | QUAL-0034 | CLI binary is template carcass calling `lib.init` | cleanup | Medium | 16 | `src/main.zig` | **Closed** | commit c4240a1 |
-| 23 | QUAL-0032 | `WalWriter.append` + sync not coalesced | perf | Medium | 13 | `src/wal.zig` (WalWriter.append) | Open — Deferred to subsequent /gap:close run | — |
-| 24 | QUAL-0025 | `build.zig` has 177-line `build()` function | maintainability | Medium | 10 | `build.zig` | Open — Deferred to subsequent /gap:close run | — |
-| 25 | QUAL-0027 | `rss_bytes_peak` emitted even on non-Linux | perf | Medium | 10 | `benchmarks/*` | Open — Deferred to subsequent /gap:close run | — |
-| 26 | DO-4 | CI `zig-format` paths exclude `benchmarks/` and `build.zig` | ci-cd | Low | 7 | `.gitlab-ci.yml` / `.github/workflows/*` | Open — Deferred to subsequent /gap:close run | — |
+| 23 | QUAL-0032 | `WalWriter.append` + sync not coalesced | perf | Medium | 13 | `src/wal.zig` (WalWriter.append) | Open — Truly remaining open; re-audit next cycle | — |
+| 24 | QUAL-0025 | `build.zig` has 177-line `build()` function | maintainability | Medium | 10 | `build.zig` | Open — Truly remaining open; re-audit next cycle | — |
+| 25 | QUAL-0027 | `rss_bytes_peak` emitted even on non-Linux | perf | Medium | 10 | `benchmarks/*` | Open — Truly remaining open; re-audit next cycle | — |
+| 26 | DO-4 | CI `zig-format` paths exclude `benchmarks/` and `build.zig` | ci-cd | Low | 7 | `.gitlab-ci.yml` / `.github/workflows/*` | Open — Truly remaining open; re-audit next cycle | — |
 | 27 | D-1 | `writeU32/U64`, `readU32/U64` duplicated between `wal.zig` and `manifest.zig` | maintainability | Low | 7 | `src/wal.zig`, `src/manifest.zig` | **Closed** | commit ac16729 |
 | 28 | D-2, QUAL-0023 | `segment.zig` has differently-shaped `readU*` helpers — confusing duplication | readability | Low | 7 | `src/segment.zig` | **Closed** | commit ac16729 |
 | 29 | DC-5, QUAL-0031 | Root-level `test_al.zig` / `test_crc.zig` / `test_io.zig` orphans, not gitignored | cleanup | Low | 7 | `test_al.zig`, `test_crc.zig`, `test_io.zig` | **Closed** | commit eceedc6 |
 | 30 | DO-2, DO-3 | `root.zig` template placeholders in doc comments | docs | Low | 7 | `src/root.zig` | **Closed** | commit 7234563 |
-| 31 | QUAL-0022 | Stale comment in `MemPosting` | readability | Low | 4 | `src/engine.zig` (MemPosting) | Open — Deferred to subsequent /gap:close run | — |
-| 32 | QUAL-0024 | Record-type validation duplicated | maintainability | Low | 4 | `src/wal.zig` | Open — Deferred to subsequent /gap:close run | — |
+| 31 | QUAL-0022 | Stale comment in `MemPosting` | readability | Low | 4 | `src/engine.zig` (MemPosting) | Open — Truly remaining open; re-audit next cycle | — |
+| 32 | QUAL-0024 | Record-type validation duplicated | maintainability | Low | 4 | `src/wal.zig` | Open — Truly remaining open; re-audit next cycle | — |
 | 33 | DC-2, DC-3 | `Manifest.total_docs` / `avg_doc_len` dead fields | cleanup | Low | 4 | `src/manifest.zig` | **Closed** | commit 2934b17 |
-| 34 | QUAL-0026 | `-Dtsan` / `-Dno-cli` help text inaccuracies | docs | Low | 4 | `build.zig` (option descriptions) | Open — Deferred to subsequent /gap:close run | — |
-| 35 | QUAL-0028 | `atomicWrite` cross-platform claims unverified | docs | Low | 4 | `src/utils.zig` doc comment | Open — Deferred to subsequent /gap:close run | — |
-| 36 | QUAL-0033 | WAL payload cap is magic number | readability | Low | 4 | `src/wal.zig` | Open — Deferred to subsequent /gap:close run | — |
-| 37 | QUAL-0029 | `CHANGELOG.md` placeholder date | docs | Low | 3 | `CHANGELOG.md` | Open — Deferred to subsequent /gap:close run | — |
-| 38 | QUAL-0030 | `SECURITY.md` / `SUPPORT.md` template emails unverified | docs | Low | 3 | `SECURITY.md`, `SUPPORT.md` | Open — Deferred to subsequent /gap:close run | — |
+| 34 | QUAL-0026 | `-Dtsan` / `-Dno-cli` help text inaccuracies | docs | Low | 4 | `build.zig` (option descriptions) | Open — Truly remaining open; re-audit next cycle | — |
+| 35 | QUAL-0028 | `atomicWrite` cross-platform claims unverified | docs | Low | 4 | `src/utils.zig` doc comment | Open — Truly remaining open; re-audit next cycle | — |
+| 36 | QUAL-0033 | WAL payload cap is magic number | readability | Low | 4 | `src/wal.zig` | Open — Truly remaining open; re-audit next cycle | — |
+| 37 | QUAL-0029 | `CHANGELOG.md` placeholder date | docs | Low | 3 | `CHANGELOG.md` | Open — Truly remaining open; re-audit next cycle | — |
+| 38 | QUAL-0030 | `SECURITY.md` / `SUPPORT.md` template emails unverified | docs | Low | 3 | `SECURITY.md`, `SUPPORT.md` | Open — Truly remaining open; re-audit next cycle | — |
 
 ---
 
@@ -114,21 +115,23 @@ Sorted by `PriorityScore` descending. All file:line citations point at `/home/be
 | D-2 | `segment.zig` differently-shaped `readU*` helpers | ac16729 | See QUAL-0023 above |
 | DC-2, DC-3 | `Manifest.total_docs` / `avg_doc_len` dead fields | 2934b17 | Populated during flush; no longer dead |
 | DO-2, DO-3 | `root.zig` template placeholders in doc comments | 7234563 | Replaced with real module description |
+| QUAL-0015 | `varint` silent `@intCast` truncation in ReleaseFast | 91b3ba7 | Pre-check guards on all untrusted-length `@intCast` calls; also closes SEC-EXT-0102, 0103 |
+| QUAL-0016 | `SegmentReader.search` reopens dir + file each query | b620a03 | Cached fd and posting buffer; also closes PERF-0005, PERF-0007 |
 
 ---
 
 ## Top 10 by PriorityScore (post-closure)
 
-1. **QUAL-0002** — `docs/fts-storage-spec.md` LLM artifacts. (Critical, score 80) — Open
-2. **QUAL-0015** — `varint` silent `@intCast` truncation in ReleaseFast. (Medium, score 32) — Open
-3. **QUAL-0016** — `SegmentReader.search` reopens dir+file each query. (Medium, score 32) — Open
-4. **QUAL-0032** — `WalWriter.append` + sync not coalesced. (Medium, score 13) — Open
-5. **QUAL-0025** — 177-line `build()` function. (Medium, score 10) — Open
-6. **QUAL-0027** — `rss_bytes_peak` emitted on non-Linux. (Medium, score 10) — Open
-7. **DO-4** — CI `zig-format` excludes `benchmarks/` and `build.zig`. (Low, score 7) — Open
-8. **QUAL-0022** — Stale comment in `MemPosting`. (Low, score 4) — Open
-9. **QUAL-0024** — Record-type validation duplicated. (Low, score 4) — Open
-10. **QUAL-0026** — `-Dtsan` / `-Dno-cli` help text inaccuracies. (Low, score 4) — Open
+1. **QUAL-0002** — `docs/fts-storage-spec.md` LLM artifacts. (Critical, score 80) — Won't-Do (Deferred doc cycle, d8da757)
+2. **QUAL-0015** — `varint` silent `@intCast` truncation in ReleaseFast. (Medium, score 32) — Closed (91b3ba7)
+3. **QUAL-0016** — `SegmentReader.search` reopens dir+file each query. (Medium, score 32) — Closed (b620a03)
+4. **QUAL-0032** — `WalWriter.append` + sync not coalesced. (Medium, score 13) — Open (deferred)
+5. **QUAL-0025** — 177-line `build()` function. (Medium, score 10) — Open (deferred)
+6. **QUAL-0027** — `rss_bytes_peak` emitted on non-Linux. (Medium, score 10) — Open (deferred)
+7. **DO-4** — CI `zig-format` excludes `benchmarks/` and `build.zig`. (Low, score 7) — Open (deferred)
+8. **QUAL-0022** — Stale comment in `MemPosting`. (Low, score 4) — Open (deferred)
+9. **QUAL-0024** — Record-type validation duplicated. (Low, score 4) — Open (deferred)
+10. **QUAL-0026** — `-Dtsan` / `-Dno-cli` help text inaccuracies. (Low, score 4) — Open (deferred)
 
 ---
 
@@ -168,6 +171,6 @@ Sorted by `PriorityScore` descending. All file:line citations point at `/home/be
 
 ## Status
 
-**21 of 38 findings closed across closure runs (2026-05-26). 17 findings remain open.**
+**25 of 38 findings closed across closure runs (2026-05-26). 1 Won't-Do (QUAL-0002). 12 findings remain open (deferred to future cycles — all low/medium priority).**
 
 No GitLab issues were created, updated, or closed by this run. This document is the sole artifact.

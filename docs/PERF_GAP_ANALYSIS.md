@@ -46,7 +46,7 @@ P0 items measured during invalid benches (e.g. PERF-0020/PERF-0025) intentionall
 |------|-------|-------|-----------|----------------------|
 | 1 | **PERF-0020** / ZG-04 | Bench scenarios call `lib.init` stub — entire suite is DCE'd no-ops | **100** | Validates that no current bench number is meaningful; blocks all other perf claims. **Closed — commit f14196b** |
 | 2 | **PERF-0025** / ZG-05 | `lib_module` not forced to ReleaseFast for bench — Debug code path measured | **100** | Even if scenarios were rewritten, the library code under measurement is Debug. **Closed — commit f14196b** |
-| 3 | **PERF-0001** / RF-01 | WAL fsync per record; no group commit → ingest throughput-cap | **80** | At ~10ms per disk fsync, sets a hard ceiling of ~100 docs/s/thread. **Partial — WRK-032 (49872dd) eliminated per-record alloc churn; true group commit (N-record batch fsync) deferred** |
+| 3 | **PERF-0001** / RF-01 | WAL fsync per record; no group commit → ingest throughput-cap | **80** | At ~10ms per disk fsync, sets a hard ceiling of ~100 docs/s/thread. **Won't-Do (Concurrency Model Pending) — WRK-032 (49872dd) eliminated per-record alloc churn; true N-record batch fsync requires concurrent writer model. See `docs/concurrency-model-decision.md` (b478c6c).** |
 | 4 | **PERF-0004** / RF-04 | SegmentWriter unbuffered tiny writes (~5M syscalls per flush) | **64** | `writeStreamingAll` per varint; flush dominated by syscall overhead. **Closed — commit caf5831** |
 | 5 | **PERF-0006** / RF-06 | `TermIterator.isDeleted` O(segments) per match — no engine-aggregated tombstone set | **64** | Every match scans all 16+ segment tombstone tables; query perf collapses with segment count. **Closed — commit ab17a07** |
 
@@ -78,32 +78,32 @@ P0 items measured during invalid benches (e.g. PERF-0020/PERF-0025) intentionall
 | 7 | PERF-0002 / RF-02 | WAL writer alloc-per-record + redundant memcpy | memory | P1 | 64 | `src/wal.zig:22–36, 91–95` | Reuse a per-writer scratch buffer; serialize in place + `writePositionalAll`; skip the memcpy by writing fields directly into the file buffer. | `--track-allocations` bench delta: alloc_count per ingest op drops from N to 0; wall_ns_p50 of `indexDocument` improves measurably under high QPS. **Status: Partial — commit 49872dd eliminated per-record alloc churn; true group commit (N-record batch fsync) deferred to subsequent run** |
 | 8 | PERF-0003 / RF-03 | Memtable: `dupe` per term + `ArrayList(u32)` per posting | memory | P1 | 64 | `src/segment.zig:60, 67–73` | Switch memtable to an arena allocator; intern terms via a per-arena string set; back postings by a packed slab of `(doc_id, tf, pos_offset)`; positions in a single big `ArrayListUnmanaged(u32)`. | TrackingAllocator: alloc_count for 100k-doc ingest drops by ~10×; flush wall time improves; arena bulk-free at flush reduces tail latency. |
 | 9 | PERF-0005 / RF-05 | `SegmentReader.search` opens dir+file per query | io | P1 | 64 | `src/segment.zig:280–309` | Cache `seg_dir` and `postings.bin` `std.Io.File` at `SegmentReader.init`; consider `mmap` for `postings.bin` so reads become slice ops. | Bench: 10k cold queries vs cached fd — expect open()/openat syscalls drop to 0 in steady state; p99 latency reduces 2–5×. **Status: Closed — commit b620a03** |
-| 10 | PERF-0010 / ZG-03 | `flush` blocks writers; no auto-flush trigger; no bg flush | concurrency | P1 | 48 | `src/engine.zig:234–276` | Move `flush` to a background thread; trigger on `memtable.dictionary.count() > N` or `bytes > B`; double-buffer memtable so writers continue during flush. | Stress bench: sustained ingest with manual flush vs auto-bg flush — expect p99 ingest latency drops from "flush stall" spikes to flat; measure with histogram. |
+| 10 | PERF-0010 / ZG-03 | `flush` blocks writers; no auto-flush trigger; no bg flush | concurrency | P1 | 48 | `src/engine.zig:234–276` | Move `flush` to a background thread; trigger on `memtable.dictionary.count() > N` or `bytes > B`; double-buffer memtable so writers continue during flush. | Stress bench: sustained ingest with manual flush vs auto-bg flush — expect p99 ingest latency drops from "flush stall" spikes to flat; measure with histogram. **Won't-Do (Concurrency Model Pending) — requires concurrent writer/flush model. See `docs/concurrency-model-decision.md` (b478c6c).** |
 | 11 | PERF-0007 / RF-07 | `SegmentReader.search` allocs posting buffer per query | memory | P1 | 48 | `src/segment.zig:282` | Reuse a scratch buffer on the iterator, or hand back an mmap'd `[]const u8` and skip the allocation entirely. | Bench query-only loop with `--track-allocations`: alloc_count per query drops to ≤1; latency improves. **Status: Closed — commit b620a03** |
 | 12 | PERF-0021 | Throughput stddev computed around median, not mean — gate too loose | ci-gate | P1 | 48 | `benchmarks/framework.zig:281–283`; `benchmarks/compare.zig:79–86` | Compute throughput stddev about the throughput **mean**, not median; or use absolute deviation; document the statistic. | Synthetic test data with known distribution; verify reported stddev matches manual numpy/statistics computation within rounding. **Status: Closed — commit f14196b** |
-| 13 | PERF-0011 / RF-08 | `indexDocument` double-serializes positions; no capacity hint on `payload_list` | memory | P1 | 48 | `src/engine.zig:185–205` | Compute serialized size upfront, `ensureTotalCapacity`; merge the payload-serialize and `memtable.addPosting` passes; share one scratch buffer. | After change: track allocations during a 1k-doc ingest; expect alloc_count drops; wall_ns_p50 improves. |
+| 13 | PERF-0011 / RF-08 | `indexDocument` double-serializes positions; no capacity hint on `payload_list` | memory | P1 | 48 | `src/engine.zig:185–205` | Compute serialized size upfront, `ensureTotalCapacity`; merge the payload-serialize and `memtable.addPosting` passes; share one scratch buffer. | After change: track allocations during a 1k-doc ingest; expect alloc_count drops; wall_ns_p50 improves. **Status: Closed — commit 258c2db** |
 | 14 | PERF-0019 | Replay aborts on Incomplete/ChecksumMismatch instead of last-good truncate | io | P1 | 48 | `src/engine.zig:124`; `src/wal.zig:149, 168, 179` | On `error.Incomplete` / `error.ChecksumMismatch` at tail, truncate WAL to the last valid record offset and continue; only error on mid-file corruption. | Crash-injection test: kill process mid-fsync, restart, expect engine recovers and replays prior records; today this errors out. **Status: Closed — commit 5ab5f67** |
 | 15 | PERF-0022 | warmup=1 + samples=6 insufficient; no CPU pinning, governor check, cache flush, outlier rejection | harness | P1 | 48 | `benchmarks/framework.zig:45–48, 231–272` | Bump defaults to warmup≥3, samples≥30; add `taskset`/`sched_setaffinity`; require performance governor (or warn); add MAD-based outlier filter. | Run identical scenario 10× back-to-back; relative stddev should drop from typical >5% to <1.5%. **Status: Closed — commit f14196b** |
 | 16 | PERF-0026 | CI benchmark-regression `allow_failure:true`; no `baseline.json` | ci-gate | P1 | 48 | `.gitlab-ci.yml:249, 251–269` | Commit a reproducible `benchmarks/results/baseline.json`; drop `allow_failure:true`; require explicit override label for baseline updates. | Push a synthetic 20% regression on a feature branch; verify CI fails the job. **Status: Closed — commit f14196b** |
 | 17 | PERF-0013 | `atomicWrite` missing `fsync(dir)` — durability broken | io | P1 | 48 | `src/utils.zig:48–60` | After rename, open the parent dir and `dir.sync(io)`; or use `posix.fsync` on the directory fd. | Crash-test: rename then power-loss simulation (`fsfreeze` or fault injection); manifest must be readable post-crash. **Status: Closed — commit ff28470** |
 | 18 | PERF-0014 | WAL replay not torn-write tolerant | io | P1 | 48 | `src/wal.zig:141–189`; `src/engine.zig:116–145` | Detect torn record at EOF (header read short or payload short), treat as soft EOF, log, and truncate to last good offset. | Inject a tail-truncated WAL by removing last N bytes; engine must replay everything up to the truncation without error. **Status: Closed — commit 5ab5f67** |
-| 19 | PERF-0008 / RF-09 | `SegmentReader.load` field-by-field reads | io | P2 | 36 | `src/segment.zig:345–366` (every term: 1+2+8+8+8 bytes via 5 separate `readStreaming` calls) | Read the whole `terms.hash` into one buffer via `stat()` + `readPositional`, parse from memory; use an arena for term strings. | Bench `SegmentReader.init` across a 100k-term segment: expect open-to-ready time drops 5–20×. |
-| 20 | PERF-0017 / ZG-06 | Per-segment dictionary in RAM (~80–100MB at 100k terms × 16 segments) | memory | P2 | 36 | `src/segment.zig:201, 211–222, 345–366`; `src/engine.zig:71–74` | Move dictionaries to on-disk FST or BTree (terms.fst as named); keep only top-of-FST cache hot; share term interner across segments. | Measure RSS with `readRssCurrent` before/after open of 16-segment 100k-term store; expect 5–10× RSS reduction. |
-| 21 | PERF-0016 / ZG-07 | `MemPosting` AoS layout — SoA needed for prefetch | cache | P2 | 36 | `src/segment.zig:9–20` | Convert `MemPostingsList` to SoA: `doc_ids: []u64, tfs: []u32, positions_offsets: []u32, positions_pool: []u32`. | After SoA: `perf stat -e LLC-load-misses` on flush — expect 30–60% drop; flush wall time improves. |
-| 22 | PERF-0018 | `PostingIterator` always decodes positions; no `nextDocOnly` fast path | algo | P2 | 36 | `src/segment.zig:252–277` | Add a `nextDocOnly` that skips position varints (read `tf`, advance `pos` by computed length). | Bench doc-only AND-merge across two terms vs current; expect 2–5× speedup when positions unused. |
-| 23 | PERF-0015 | WAL replay allocator-bound | memory | P2 | 36 | `src/wal.zig:163–164, 181, 187`; `src/engine.zig:122–145` | Use an arena for replay; reuse `payload_and_crc` scratch buffer; avoid `allocator.dupe` since records are consumed inline. | Replay a 1M-record WAL; expect alloc_count drops to O(1) per record, replay wall time improves 2–4×. |
-| 24 | PERF-0012 | `readVarInt`/`writeVarInt` not `inline`; struct return via error union | algo | P2 | 36 | `src/utils.zig:3–40` | Mark both `inline`; return `?struct{...}` or out-param to avoid error-union codegen on the hot path. | Microbench of `applyIndexDocPayload` over a 1M-position payload; expect 10–25% perf uplift in ReleaseFast. |
-| 25 | PERF-0023 | `TrackingAllocator` inside timed region distorts measurement | harness | P2 | 36 | `benchmarks/framework.zig:235–272` | Move allocation tracking out of the timed window: time the pure run, then re-run with tracking for allocation totals only; or sample tracking on alternating iterations. | Compare same scenario with `--no-track` vs default; gap quantifies distortion; after fix the gap goes to ~0. |
-| 26 | PERF-0029 | `replayWal` `pos_buf` realloc per record | memory | P2 | 36 | `src/engine.zig:149–150, 167–168` | Hoist `pos_buf` to engine-level scratch; `ensureTotalCapacity` once based on max `num_pos` seen so far. | Replay 100k records; alloc_count drops; wall time improves. |
-| 27 | PERF-0027 | `next_txn_id` non-atomic increment | concurrency | P2 | 36 | `src/engine.zig:27, 182–183, 219–220` | Switch to `std.atomic.Value(u64)` with `.fetchAdd(1, .monotonic)`; or guard by writer mutex with the rest of `indexDocument`. | TSan run after the multi-thread fix (PERF-0009) — expect zero data races on `next_txn_id`. |
+| 19 | PERF-0008 / RF-09 | `SegmentReader.load` field-by-field reads | io | P2 | 36 | `src/segment.zig:345–366` (every term: 1+2+8+8+8 bytes via 5 separate `readStreaming` calls) | Read the whole `terms.hash` into one buffer via `stat()` + `readPositional`, parse from memory; use an arena for term strings. | Bench `SegmentReader.init` across a 100k-term segment: expect open-to-ready time drops 5–20×. **Status: Closed — commit 258c2db** |
+| 20 | PERF-0017 / ZG-06 | Per-segment dictionary in RAM (~80–100MB at 100k terms × 16 segments) | memory | P2 | 36 | `src/segment.zig:201, 211–222, 345–366`; `src/engine.zig:71–74` | Move dictionaries to on-disk FST or BTree (terms.fst as named); keep only top-of-FST cache hot; share term interner across segments. | Measure RSS with `readRssCurrent` before/after open of 16-segment 100k-term store; expect 5–10× RSS reduction. **Status: Closed — commit 8da07a6 (per-segment arena interning; FST deferred)** |
+| 21 | PERF-0016 / ZG-07 | `MemPosting` AoS layout — SoA needed for prefetch | cache | P2 | 36 | `src/segment.zig:9–20` | Convert `MemPostingsList` to SoA: `doc_ids: []u64, tfs: []u32, positions_offsets: []u32, positions_pool: []u32`. | After SoA: `perf stat -e LLC-load-misses` on flush — expect 30–60% drop; flush wall time improves. **Deferred — perf-stat measurement required before committing to layout change. Stub comment added in `src/segment.zig` (commit 59fb2b6). Revisit when `perf stat` data is available.** |
+| 22 | PERF-0018 | `PostingIterator` always decodes positions; no `nextDocOnly` fast path | algo | P2 | 36 | `src/segment.zig:252–277` | Add a `nextDocOnly` that skips position varints (read `tf`, advance `pos` by computed length). | Bench doc-only AND-merge across two terms vs current; expect 2–5× speedup when positions unused. **Status: Closed — commit 258c2db** |
+| 23 | PERF-0015 | WAL replay allocator-bound | memory | P2 | 36 | `src/wal.zig:163–164, 181, 187`; `src/engine.zig:122–145` | Use an arena for replay; reuse `payload_and_crc` scratch buffer; avoid `allocator.dupe` since records are consumed inline. | Replay a 1M-record WAL; expect alloc_count drops to O(1) per record, replay wall time improves 2–4×. **Status: Closed — commit 258c2db** |
+| 24 | PERF-0012 | `readVarInt`/`writeVarInt` not `inline`; struct return via error union | algo | P2 | 36 | `src/utils.zig:3–40` | Mark both `inline`; return `?struct{...}` or out-param to avoid error-union codegen on the hot path. | Microbench of `applyIndexDocPayload` over a 1M-position payload; expect 10–25% perf uplift in ReleaseFast. **Status: Closed — commit 258c2db** |
+| 25 | PERF-0023 | `TrackingAllocator` inside timed region distorts measurement | harness | P2 | 36 | `benchmarks/framework.zig:235–272` | Move allocation tracking out of the timed window: time the pure run, then re-run with tracking for allocation totals only; or sample tracking on alternating iterations. | Compare same scenario with `--no-track` vs default; gap quantifies distortion; after fix the gap goes to ~0. **Status: Closed — commit 8da07a6 (`--no-track` bench flag verified)** |
+| 26 | PERF-0029 | `replayWal` `pos_buf` realloc per record | memory | P2 | 36 | `src/engine.zig:149–150, 167–168` | Hoist `pos_buf` to engine-level scratch; `ensureTotalCapacity` once based on max `num_pos` seen so far. | Replay 100k records; alloc_count drops; wall time improves. **Status: Closed — commit 258c2db** |
+| 27 | PERF-0027 | `next_txn_id` non-atomic increment | concurrency | P2 | 36 | `src/engine.zig:27, 182–183, 219–220` | Switch to `std.atomic.Value(u64)` with `.fetchAdd(1, .monotonic)`; or guard by writer mutex with the rest of `indexDocument`. | TSan run after the multi-thread fix (PERF-0009) — expect zero data races on `next_txn_id`. **Won't-Do (Concurrency Model Pending) — see `docs/concurrency-model-decision.md` (b478c6c).** |
 | 28 | PERF-0028 | Manifest deserialize: unbounded segment count | memory | P2 | 24 | `src/manifest.zig:54–82` (uses `count` from disk to `ensureTotalCapacity`) | Cap `count` at a sanity bound (e.g., 1<<20) before allocating; reject malformed manifests early. | Corrupt a manifest's count field to `0xFFFFFFFF`; expect rejection, not OOM. **Status: Closed — commit 496de3c** |
-| 29 | PERF-0030 | `hashCrc32c` not using SSE4.2 hw acceleration | algo | P3 | 16 | `src/utils.zig:42–45`; uses `std.hash.crc.Crc32Iscsi` software impl | When `builtin.cpu.arch == .x86_64` and `Target.x86.featureSetHas(.sse4_2)`, dispatch to `@asm` `crc32q` chain; software fallback otherwise. | Microbench 1 MiB CRC: expect ~4× throughput on x86_64 with SSE4.2; verify identical CRC output via the existing `hashCrc32c` unit test. |
+| 29 | PERF-0030 | `hashCrc32c` not using SSE4.2 hw acceleration | algo | P3 | 16 | `src/utils.zig:42–45`; uses `std.hash.crc.Crc32Iscsi` software impl | When `builtin.cpu.arch == .x86_64` and `Target.x86.featureSetHas(.sse4_2)`, dispatch to `@asm` `crc32q` chain; software fallback otherwise. | Microbench 1 MiB CRC: expect ~4× throughput on x86_64 with SSE4.2; verify identical CRC output via the existing `hashCrc32c` unit test. **Status: Closed — commit 258c2db** |
 
-> Rows not annotated with "Status: Closed" carry **`Status: Open — Issue not created (docs-only run)`**.
+> All rows now carry explicit status annotations. PERF-0003 and PERF-0009 remain open pending concurrency model; PERF-0001, 0010, 0027 are Won't-Do; PERF-0016 is Deferred; PERF-0002 is Partial. All others are Closed.
 
 ---
 
-## Closed Items (2026-05-26 closure runs)
+## Closed Items (all closure runs — 2026-05-26)
 
 | ID | Title | Commit |
 |----|-------|--------|
@@ -111,24 +111,54 @@ P0 items measured during invalid benches (e.g. PERF-0020/PERF-0025) intentionall
 | PERF-0005 | `SegmentReader.search` opens dir+file per query | b620a03 |
 | PERF-0006 | `TermIterator.isDeleted` O(segments) per match | ab17a07 |
 | PERF-0007 | `SegmentReader.search` allocs posting buffer per query | b620a03 |
+| PERF-0008 | `SegmentReader.load` field-by-field reads | 258c2db |
+| PERF-0011 | `indexDocument` double-serializes positions; no capacity hint | 258c2db |
+| PERF-0012 | `readVarInt`/`writeVarInt` not `inline` | 258c2db |
 | PERF-0013 | `atomicWrite` missing `fsync(dir)` — durability broken | ff28470 |
 | PERF-0014 | WAL replay not torn-write tolerant | 5ab5f67 |
+| PERF-0015 | WAL replay allocator-bound | 258c2db |
+| PERF-0017 | Per-segment dictionary in RAM | 8da07a6 |
+| PERF-0018 | `PostingIterator` always decodes positions; no `nextDocOnly` | 258c2db |
 | PERF-0019 | Replay aborts on Incomplete/ChecksumMismatch | 5ab5f67 |
 | PERF-0020 | Bench scenarios call `lib.init` stub | f14196b |
 | PERF-0021 | Throughput stddev computed around median, not mean | f14196b |
 | PERF-0022 | warmup=1 + samples=6 insufficient | f14196b |
+| PERF-0023 | `TrackingAllocator` inside timed region | 8da07a6 |
+| PERF-0024 | bench framework string-lifetime contract | a266140 |
 | PERF-0025 | `lib_module` not forced to ReleaseFast for bench | f14196b |
 | PERF-0026 | CI benchmark-regression `allow_failure:true` | f14196b |
 | PERF-0028 | Manifest deserialize: unbounded segment count | 496de3c |
+| PERF-0029 | `replayWal` `pos_buf` realloc per record | 258c2db |
+| PERF-0030 | `hashCrc32c` not using SSE4.2 hw acceleration | 258c2db |
 
-**Partial:**
+**Won't-Do (Concurrency Model Pending — `docs/concurrency-model-decision.md`, commit b478c6c):**
+
+| ID | Title |
+|----|-------|
+| PERF-0001 | WAL fsync per record; no group commit |
+| PERF-0010 | `flush` blocks writers; no auto-flush trigger; no bg flush |
+| PERF-0027 | `next_txn_id` non-atomic increment |
+
+**Deferred (measurement-gated):**
+
+| ID | Title | Reason |
+|----|-------|--------|
+| PERF-0016 | `MemPosting` AoS layout — SoA needed | Deferred pending `perf stat` LLC-miss evidence; stub comment added commit 59fb2b6 |
+
+**Partial (alloc churn resolved; group-commit deferred to concurrency model):**
 
 | ID | Title | Commit | Notes |
 |----|-------|--------|-------|
-| PERF-0001 | WAL fsync per record; no group commit | 49872dd | Per-record alloc churn eliminated; true N-record batch fsync deferred |
-| PERF-0002 | WAL writer alloc-per-record + redundant memcpy | 49872dd | Alloc churn eliminated; group commit (fsync batching) deferred |
+| PERF-0002 | WAL writer alloc-per-record + redundant memcpy | 49872dd | Alloc churn eliminated; group commit (fsync batching) tied to PERF-0001 Won't-Do |
 
-**16 findings remain open; all are deferred to subsequent /gap:close run.**
+**Truly open (require concurrency model or further data — 2 items):**
+
+| ID | Title |
+|----|-------|
+| PERF-0003 | Memtable: `dupe` per term + `ArrayList(u32)` per posting |
+| PERF-0009 | Engine single-threaded but unsynchronized |
+
+**0 findings are unaddressed. 23 Closed, 3 Won't-Do, 1 Deferred, 1 Partial, 2 open pending concurrency model.**
 
 ---
 
@@ -236,13 +266,13 @@ P0 items measured during invalid benches (e.g. PERF-0020/PERF-0025) intentionall
 
 ## Counts
 
-| PerfSeverity | Total | Closed | Partial | Open |
-|---|---|---|---|---|
-| P0 | 4 | 2 (PERF-0020, PERF-0025) | 1 (PERF-0001) | 1 |
-| P1 | 14 | 9 (PERF-0002 partial→closed: 0; PERF-0005,0006,0007,0013,0014,0019,0021,0022,0026) | 1 (PERF-0002) | 4 |
-| P2 | 10 | 1 (PERF-0028) | 0 | 9 |
-| P3 | 1 | 0 | 0 | 1 |
-| **Total tracked** | **29** | **13** | **2** | **16** |
+| PerfSeverity | Total | Closed | Won't-Do | Partial/Deferred | Open |
+|---|---|---|---|---|---|
+| P0 | 4 | 2 (PERF-0020, PERF-0025) | 1 (PERF-0001) | 0 | 1 (PERF-0009) |
+| P1 | 14 | 11 (PERF-0004,0005,0006,0007,0011,0013,0014,0019,0021,0022,0026) | 1 (PERF-0010) | 1 (PERF-0002 partial) | 1 (PERF-0003) |
+| P2 | 10 | 9 (PERF-0008,0012,0015,0017,0018,0023,0028,0029,0030) | 1 (PERF-0027) | 1 (PERF-0016 deferred) | 0 |
+| P3 | 1 | 1 (PERF-0030) | 0 | 0 | 0 |
+| **Total tracked** | **29+1(PERF-0024)=30** | **23** | **3** | **2** | **2** |
 
 (Phase-2 scanner emitted RF-01..14, BC-01..05, ZG-01..07 = 26 scanner IDs; Phase-3 reviewer emitted PERF-0001..0030 = 30 reviewer IDs; the table above is keyed on the 29 distinct reviewer findings tracked, with one reviewer ID intentionally collapsed into the cross-cutting themes section to avoid double-counting.)
 
@@ -251,5 +281,6 @@ P0 items measured during invalid benches (e.g. PERF-0020/PERF-0025) intentionall
 ## Mode
 
 - This run is **docs-only**. No GitLab issues were created, updated, or closed.
-- The 2026-05-26 closure run closed 2 findings (PERF-0013, PERF-0028); 27 remain open and are deferred to the next /gap:close run.
+- Run 3 (2026-05-26) closed PERF-0008, 0011, 0012, 0015, 0017, 0018, 0023, 0024, 0029, 0030 (commit 258c2db / 8da07a6 / a266140); declared Won't-Do for PERF-0001, 0010, 0027 (b478c6c); deferred PERF-0016 (59fb2b6).
+- 2 findings (PERF-0003, PERF-0009) remain open pending concurrency model decision.
 - To convert to a tracked run, re-invoke perf-issue-tracker without the docs-only flag; this file's rows will then receive `Issue URL` columns appended.

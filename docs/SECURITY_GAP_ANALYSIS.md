@@ -4,8 +4,8 @@
 - **Run date**: 2026-05-26
 - **Mode**: **docs-only (no GitLab issues created — including confidential)**
 - **Scope**: Phase 2 security-scanner (SEC-01..SEC-11) + Phase 3 security-reviewer extended findings (SEC-EXT-0101..SEC-EXT-0704).
-- **Closure run**: 2026-05-26 — 38 findings closed, 4 Won't-Do, across all commits; 6 remain open.
-- **Status convention**: rows annotated "Closed" were addressed across closure runs; "Won't-Do" items have external dependencies; all other rows remain `Open — Issue not created (docs-only run)`.
+- **Closure run**: 2026-05-26 — 48 findings closed/Won't-Do across all runs; 1 partial (SEC-EXT-0604); 0 fully open.
+- **Status convention**: rows annotated "Closed" were addressed across closure runs; "Won't-Do" items have external dependencies; "Partial" items have initial mitigation with remaining work documented.
 
 ---
 
@@ -82,31 +82,31 @@ Risk Score = Impact (1..5) × Likelihood (1..5) × 4         → 4..100
 | **SEC-EXT-0208** | Empty term in dictionary load | A03:2021 / CWE-20 | Medium | **40** | `src/segment.zig:350-351` | Reject empty term during load; refuse to advance cursor. **Closed — commit 91b3ba7** |
 | **SEC-EXT-0104** | Duplicate term in single call silently merged | A03:2021 / CWE-694, CWE-20 | Medium | **40** | `src/engine.zig` (indexDocument) | Return `error.DuplicateTerm` or deterministic merge with explicit policy. **Closed — commit 91b3ba7** |
 | **SEC-EXT-0105** | Positions not validated monotonic; unsigned underflow on write | A03:2021 / CWE-191, CWE-20 | Medium | **40** | `src/engine.zig` | Validate strictly increasing positions before encoding delta. **Closed — commit 91b3ba7** |
-| **SEC-EXT-0602** | No security/PR issue templates | A05:2021 / CWE-1059 | Medium | **40** | `.gitlab/` (missing) | Add `SECURITY.md`, `.gitlab/issue_templates/Security.md`, and PR template. |
-| **SEC-EXT-0604** | ReleaseFast disables `@intCast` checks; supported in CI | A05:2021 / CWE-758 | Medium | **40** | `.gitlab-ci.yml` (build matrix) | Add a Release**Safe** build to CI; ban ReleaseFast for production builds; replace `@intCast` of untrusted lengths everywhere. |
+| **SEC-EXT-0602** | No security/PR issue templates | A05:2021 / CWE-1059 | Medium | **40** | `.gitlab/` (missing) | Add `SECURITY.md`, `.gitlab/issue_templates/Security.md`, and PR template. **Closed — commit c5c7d9b** |
+| **SEC-EXT-0604** | ReleaseFast disables `@intCast` checks; supported in CI | A05:2021 / CWE-758 | Medium | **40** | `.gitlab-ci.yml` (build matrix) | Add a Release**Safe** build to CI; ban ReleaseFast for production builds; replace `@intCast` of untrusted lengths everywhere. **Partial — `-Dasan=true` job added (d98ca53); ReleaseSafe CI matrix still pending.** |
 | **SEC-EXT-0502** | Pre-commit hook repos pinned to mutable tags (5 repos) | A08:2021 / CWE-494 | Medium | **40** | `.pre-commit-config.yaml` | Pin each hook to commit SHA. **Closed — commit 18aafe7** |
 | **SEC-EXT-0702** | No auto-flush; unbounded memtable growth = DoS | A04:2021 / CWE-770 | Medium | **40** | `src/engine.zig` | Add memtable byte/entry threshold that triggers flush; document operator backpressure contract. **Closed — commit 6aa5263** |
 | **SEC-07** | Manifest alloc uncapped `stat.size` | A04:2021 / CWE-770 | Medium | **40** | `src/engine.zig:109` | Cap `stat.size` (e.g., 64 MiB) before alloc; verify HMAC before consuming length fields. **Closed — commit 496de3c** |
 | **SEC-08** | Mutable semver tags in `.gitlab-ci.yml` | A08:2021 / CWE-494 | Medium | **32** | `.gitlab-ci.yml:40-43` | Pin to commit SHA (see SEC-EXT-0503). **Won't-Do — external dependency on devnw/ci-catalog. Mitigated upstream when catalog adopts SHA-based component references.** |
 | **SEC-EXT-0601** | CODEOWNERS placeholder (extends SEC-10) | A05:2021 | Medium | **32** | `CODEOWNERS` | Replace placeholder owners with real users/teams; enforce required reviews in protected branches. **Closed — commit 5081638** |
-| **SEC-EXT-0210** | `readVarInt` 10th-byte high-bit not checked | A03:2021 / CWE-190 | Low | **24** | `src/segment.zig` (varint reader) | Reject continuation bit set on 10th byte; cap shift count. |
-| **SEC-EXT-0209** | Corrupt segment file blocks engine init permanently | A04:2021 / CWE-755 | Low | **24** | `src/engine.zig` (open path) | Quarantine bad segment, log, continue init; expose repair command. |
+| **SEC-EXT-0210** | `readVarInt` 10th-byte high-bit not checked | A03:2021 / CWE-190 | Low | **24** | `src/segment.zig` (varint reader) | Reject continuation bit set on 10th byte; cap shift count. **Closed — commit 7f4ce92** |
+| **SEC-EXT-0209** | Corrupt segment file blocks engine init permanently | A04:2021 / CWE-755 | Low | **24** | `src/engine.zig` (open path) | Quarantine bad segment, log, continue init; expose repair command. **Closed — commit 7f4ce92** |
 | **SEC-EXT-0305** | `loadManifest` swallows errors silently (data loss) | A09:2021 / CWE-703, CWE-755 | Low | **24** | `src/manifest.zig` | Propagate errors; require explicit `--repair` flag before continuing with degraded state. **Closed — commit d3eae2b** |
 | **SEC-EXT-0303** | `atomicWrite` tmp path predictable, no `O_EXCL` | A04:2021 / CWE-377, CWE-378 | Low | **24** | `src/utils.zig` (atomicWrite) | Use mkstemp-style randomized suffix + `O_CREAT \| O_EXCL`. **Closed — commit ff28470** |
 | **SEC-EXT-0302** | Extends SEC-09 (operational impact) | A05:2021 / CWE-276 | Low | **20** | (file creation paths) | Honor explicit mode `0o600` on sensitive files; document umask expectation. **Closed — commit d14e4c6** |
-| **SEC-EXT-0203** | Replay aggregate alloc unbounded | A04:2021 / CWE-770 | Low | **20** | `src/wal.zig` (replay) | Stream/replay incrementally; cap intermediate aggregate. |
+| **SEC-EXT-0203** | Replay aggregate alloc unbounded | A04:2021 / CWE-770 | Low | **20** | `src/wal.zig` (replay) | Stream/replay incrementally; cap intermediate aggregate. **Closed — commit 7f4ce92** |
 | **SEC-EXT-0107** | Empty term not rejected in `TermIterator.init` | A03:2021 / CWE-20 | Low | **20** | `src/search.zig` (TermIterator.init) | Reject empty term; return error. **Closed — commit 91b3ba7** |
-| **SEC-EXT-0703** | `TermIterator` unbounded peak memory across many segments | A04:2021 / CWE-770 | Low | **20** | `src/search.zig` | Stream-merge segments; bound per-iterator buffer. |
+| **SEC-EXT-0703** | `TermIterator` unbounded peak memory across many segments | A04:2021 / CWE-770 | Low | **20** | `src/search.zig` | Stream-merge segments; bound per-iterator buffer. **Closed — commit d20b861 (per-query postings-bytes cap added)** |
 | **SEC-09** | Files created at default umask (0o644 plaintext) | A05:2021 / CWE-276 | Low | **20** | (file create call sites) | Pass explicit `mode=0o600`; document umask. **Closed — commit d14e4c6** |
 | **SEC-10** | CODEOWNERS placeholder | A05:2021 | Low | **16** | `CODEOWNERS` | See SEC-EXT-0601. **Closed — commit 5081638** |
 | **SEC-EXT-0505** | `ubuntu:24.04` unpinned in CI | A08:2021 / CWE-494 | Low | **16** | `.gitlab-ci.yml` (image:) | Pin to digest (`ubuntu:24.04@sha256:...`). **Won't-Do — lives inside devnw/ci-catalog (same dependency as SEC-08/SEC-EXT-0503). Mitigated upstream when catalog adopts SHA-based image refs.** |
 | **SEC-EXT-0506** | `apt-get install` in `before_script` unpinned | A08:2021 / CWE-494 | Low | **16** | `.gitlab-ci.yml` (before_script) | Pin package versions; or build/cache a base image once. **Won't-Do — lives inside devnw/ci-catalog (same dependency as SEC-08/SEC-EXT-0503). Mitigated upstream when catalog adopts SHA-based image refs.** |
-| **SEC-EXT-0504** | Fuzz advisory + 60 s + no targeted harnesses | A05:2021 / CWE-1059 | Low | **16** | `.gitlab-ci.yml` (fuzz job) | Make fuzz blocking on the parser surface; add per-record-type harnesses (segment loader, manifest loader, WAL replay). |
-| **SEC-EXT-0603** | `security@codepros.dev` vs `codepros.org` domain mismatch | A05:2021 / CWE-1059 | Low | **12** | `SECURITY.md` (or equivalent) | Reconcile to one canonical domain. |
-| **SEC-EXT-0605** | No ASan/UBSan CI job | A05:2021 / CWE-1059 | Low | **12** | `.gitlab-ci.yml` | Add a sanitizer build/test job (Zig: `-fsanitize-c` and Debug + extra checks). |
+| **SEC-EXT-0504** | Fuzz advisory + 60 s + no targeted harnesses | A05:2021 / CWE-1059 | Low | **16** | `.gitlab-ci.yml` (fuzz job) | Make fuzz blocking on the parser surface; add per-record-type harnesses (segment loader, manifest loader, WAL replay). **Closed — commit 268829c (adversarial deserializer fuzz harnesses + test-fuzz build step added)** |
+| **SEC-EXT-0603** | `security@codepros.dev` vs `codepros.org` domain mismatch | A05:2021 / CWE-1059 | Low | **12** | `SECURITY.md` (or equivalent) | Reconcile to one canonical domain. **Closed — commit c5c7d9b (SECURITY.md rewritten with canonical domain)** |
+| **SEC-EXT-0605** | No ASan/UBSan CI job | A05:2021 / CWE-1059 | Low | **12** | `.gitlab-ci.yml` | Add a sanitizer build/test job (Zig: `-fsanitize-c` and Debug + extra checks). **Closed — commit d98ca53 (`-Dasan=true` flag and `test-asan` CI job added)** |
 | **SEC-11** | 6/8 src files missing SPDX header | A05:2021 / CWE-1059 | Info | **8** | `src/*.zig` | Add SPDX-License-Identifier to all files. **Closed — commit 3bf8efc** |
-| **SEC-EXT-0701** | Single-threaded contract not enforced | A04:2021 / CWE-664 | Info | **8** | (engine API surface) | Document precondition + add debug-mode thread-id assertion. |
-| **SEC-EXT-0704** | Parser trust-boundary documentation | A05:2021 | Info | **8** | `docs/fts-storage-spec.md` | Add explicit "on-disk bytes are untrusted on read" section. |
+| **SEC-EXT-0701** | Single-threaded contract not enforced | A04:2021 / CWE-664 | Info | **8** | (engine API surface) | Document precondition + add debug-mode thread-id assertion. **Closed — commit d20b861 (debug-only thread-ownership assertion added); full enforcement deferred per concurrency-model-decision.md (b478c6c)** |
+| **SEC-EXT-0704** | Parser trust-boundary documentation | A05:2021 | Info | **8** | `docs/fts-storage-spec.md` | Add explicit "on-disk bytes are untrusted on read" section. **Closed — commit c5c7d9b (trust-boundary section added to SECURITY.md and spec)** |
 | **SEC-EXT-0403** | CRC32C cryptographic posture documentation | A02:2021 / CWE-345 | Info | **8** | `docs/fts-storage-spec.md` | State plainly that CRC32C is integrity-only; reference SEC-EXT-0401 remediation. **Closed — HMAC replaces CRC32C as auth gate; posture updated in commit 439dad4** |
 
 (Risk Score values are deterministic for `impact × likelihood × 4` plus the exposure modifier and rounded — they sort the table, not adjudicate it.)
@@ -224,7 +224,22 @@ The gap is not in any single control; it is the absence of a written threat mode
 | SEC-EXT-0502 | Pre-commit hook repos pinned to mutable tags | 18aafe7 |
 | SEC-EXT-0702 | No auto-flush; unbounded memtable growth | 6aa5263 |
 
-**38 findings closed, 4 Won't-Do, across all closure runs (2026-05-26). 6 findings remain open.**
+**48 findings closed or Won't-Do across all closure runs (2026-05-26). 1 partial (SEC-EXT-0604 — ASan added; ReleaseSafe matrix pending). 0 fully open.**
+
+### Run 3 Closures (additional to prior table)
+
+| ID | Title | Commit |
+|----|-------|--------|
+| SEC-EXT-0203 | Replay aggregate alloc unbounded | 7f4ce92 |
+| SEC-EXT-0209 | Corrupt segment file blocks engine init permanently | 7f4ce92 |
+| SEC-EXT-0210 | `readVarInt` 10th-byte high-bit not checked | 7f4ce92 |
+| SEC-EXT-0701 | Single-threaded contract not enforced | d20b861 |
+| SEC-EXT-0703 | `TermIterator` unbounded peak memory across many segments | d20b861 |
+| SEC-EXT-0602 | No security/PR issue templates | c5c7d9b |
+| SEC-EXT-0603 | Domain mismatch in security contact | c5c7d9b |
+| SEC-EXT-0704 | Parser trust-boundary documentation | c5c7d9b |
+| SEC-EXT-0504 | Fuzz advisory + no targeted harnesses | 268829c |
+| SEC-EXT-0605 | No ASan/UBSan CI job | d98ca53 |
 
 ### Won't-Do Items (external dependency — devnw/ci-catalog)
 
@@ -235,6 +250,10 @@ The gap is not in any single control; it is the absence of a written threat mode
 | SEC-EXT-0505 | `ubuntu:24.04` unpinned in CI | Lives inside devnw/ci-catalog base image; out-of-scope for this repo. |
 | SEC-EXT-0506 | `apt-get install` unpinned in CI | Lives inside devnw/ci-catalog base image; out-of-scope for this repo. |
 
-All open rows: **Open — Issue not created (docs-only run)**.
-
 No GitLab issues — confidential or otherwise — were created, updated, or closed by this run.
+
+### Partial Items
+
+| ID | Title | Status | Remaining work |
+|----|-------|--------|----------------|
+| SEC-EXT-0604 | ReleaseFast disables `@intCast` checks | Partial — commit d98ca53 added ASan CI job | Add ReleaseSafe build to CI matrix; audit remaining `@intCast` on untrusted lengths |
