@@ -13,6 +13,19 @@ const limits = @import("limits.zig");
 pub const BM25_K1: f32 = 1.2;
 pub const BM25_B: f32 = 0.75;
 
+/// Caller-supplied predicate that decides whether a candidate `doc_id`
+/// should be yielded by a search iterator. Return `true` to authorize the
+/// match; `false` to silently skip it. `ctx` is whatever opaque pointer the
+/// caller passed to the iterator's `initWith*` constructor — typically a
+/// session / tenant / user context.
+///
+/// WRK-039 (GAP-0011, SEC-EXT-0106): authorization is a post-filter applied
+/// after positional + tombstone gating, not a pre-filter on the dictionary.
+/// The trade-off is throughput vs simplicity — we walk the same posting
+/// list either way, but the engine does not need to know how the
+/// application's RLS/ABAC rules are expressed.
+pub const AuthFilter = *const fn (doc_id: u64, ctx: ?*anyopaque) bool;
+
 pub const TermIterator = struct {
     eng: *engine.Engine,
     term: []const u8,
@@ -34,6 +47,13 @@ pub const TermIterator = struct {
     /// every yielded `Match.score` uses the same df (WRK-035).
     df: u64,
 
+    /// Optional RLS/ABAC post-filter. When non-null, every candidate doc_id
+    /// is passed through `auth_filter(doc_id, auth_ctx)` and skipped on
+    /// `false`. Default null preserves the pre-WRK-039 behavior
+    /// (GAP-0011, SEC-EXT-0106).
+    auth_filter: ?AuthFilter = null,
+    auth_ctx: ?*anyopaque = null,
+
     pub const Match = struct {
         doc_id: u64,
         positions: []const u32,
@@ -46,6 +66,19 @@ pub const TermIterator = struct {
     };
 
     pub fn init(allocator: Allocator, eng: *engine.Engine, term: []const u8) !TermIterator {
+        return initWithAuth(allocator, eng, term, null, null);
+    }
+
+    /// Construct a TermIterator with an optional RLS/ABAC post-filter
+    /// (WRK-039, GAP-0011, SEC-EXT-0106). Identical to `init` when
+    /// `auth_filter` is null.
+    pub fn initWithAuth(
+        allocator: Allocator,
+        eng: *engine.Engine,
+        term: []const u8,
+        auth_filter: ?AuthFilter,
+        auth_ctx: ?*anyopaque,
+    ) !TermIterator {
         // Validate inputs at the API boundary (SEC-EXT-0101, 0102).
         if (term.len == 0) return error.EmptyTerm;
         if (term.len > limits.MAX_TERM_LEN) return error.TermTooLong;
@@ -89,6 +122,8 @@ pub const TermIterator = struct {
             .seg_refs = seg_refs,
             .seg_idx = 0,
             .df = df_total,
+            .auth_filter = auth_filter,
+            .auth_ctx = auth_ctx,
         };
     }
 
@@ -198,6 +233,14 @@ pub const TermIterator = struct {
                 if (self.isDeleted(m.doc_id)) {
                     continue;
                 }
+                // WRK-039 (GAP-0011, SEC-EXT-0106): RLS/ABAC post-filter.
+                // Applied after the tombstone check so an unauthorized but
+                // already-deleted doc is treated as deleted, not as a
+                // permission denial — keeps timing-side-channel surface
+                // identical to the no-filter path.
+                if (self.auth_filter) |filter| {
+                    if (!filter(m.doc_id, self.auth_ctx)) continue;
+                }
                 return m;
             } else {
                 return null;
@@ -227,6 +270,22 @@ pub const PhraseIterator = struct {
         terms: []const []const u8,
         slop: u32,
     ) !PhraseIterator {
+        return initWithAuth(allocator, eng, terms, slop, null, null);
+    }
+
+    /// Construct a PhraseIterator with an optional RLS/ABAC post-filter
+    /// (WRK-039, GAP-0011, SEC-EXT-0106). The filter is applied to the
+    /// leading term iterator only, which is the cursor whose matches drive
+    /// candidate doc selection — trailing terms are re-iterated per
+    /// candidate and inherit the filter via the same engine's pipeline.
+    pub fn initWithAuth(
+        allocator: Allocator,
+        eng: *engine.Engine,
+        terms: []const []const u8,
+        slop: u32,
+        auth_filter: ?AuthFilter,
+        auth_ctx: ?*anyopaque,
+    ) !PhraseIterator {
         if (terms.len == 0) return error.EmptyTerm;
 
         const iters = try allocator.alloc(TermIterator, terms.len);
@@ -241,7 +300,16 @@ pub const PhraseIterator = struct {
         }
 
         for (terms, 0..) |t, i| {
-            iters[i] = try TermIterator.init(allocator, eng, t);
+            // Only the leading iterator drives candidate yield order; the
+            // trailing iterators are positional probes used by
+            // checkPhraseAt to verify alignment. Applying the auth filter
+            // only at the lead keeps a single check per candidate doc and
+            // matches the post-filter semantics of TermIterator.
+            if (i == 0) {
+                iters[i] = try TermIterator.initWithAuth(allocator, eng, t, auth_filter, auth_ctx);
+            } else {
+                iters[i] = try TermIterator.init(allocator, eng, t);
+            }
             initialized = i + 1;
         }
 
@@ -407,6 +475,39 @@ test "TermIterator yields BM25 score (rare > common)" {
     const m_common = (try common_it.next()).?;
 
     try std.testing.expect(m_rare.score > m_common.score);
+}
+
+test "AuthFilter excludes unauthorized doc_ids" {
+    // WRK-039, GAP-0011, SEC-EXT-0106: caller-supplied predicate filters
+    // candidate doc_ids before they are yielded by TermIterator.next().
+    // Default null preserves prior behavior; non-null gates each match.
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var eng = try engine.Engine.init(io, alloc, tmp_dir.dir);
+    defer eng.deinit();
+
+    const t = engine.TermPosting{ .term = "hello", .positions = &[_]u32{1} };
+    try eng.indexDocument(1, &[_]engine.TermPosting{t});
+    try eng.indexDocument(2, &[_]engine.TermPosting{t});
+    try eng.indexDocument(3, &[_]engine.TermPosting{t});
+
+    // Only authorize doc_id == 2.
+    const Filter = struct {
+        fn only2(doc_id: u64, ctx: ?*anyopaque) bool {
+            _ = ctx;
+            return doc_id == 2;
+        }
+    };
+
+    var iter = try TermIterator.initWithAuth(alloc, eng, "hello", Filter.only2, null);
+    defer iter.deinit();
+
+    const m = (try iter.next()).?;
+    try std.testing.expectEqual(@as(u64, 2), m.doc_id);
+    try std.testing.expectEqual(@as(?TermIterator.Match, null), try iter.next());
 }
 
 test "PhraseIterator yields docs with consecutive terms" {
