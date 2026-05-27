@@ -266,7 +266,9 @@ benchmark-regression:
     paths:
     - benchmarks/results/ci-current.json
     expire_in: 30 days
-  allow_failure: true # advisory until a stable baseline is committed
+  # WRK-024 / PERF-0026, GAP-0008: baseline.json is now committed, so the
+  # regression gate is enforced (previously `allow_failure: true` while the
+  # baseline was being established).
 
 bench-micro:
   extends: .zig-host-base

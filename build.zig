@@ -152,9 +152,21 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseFast,
     });
 
+    // Force-build a ReleaseFast copy of the library for benchmarks
+    // (WRK-024, PERF-0020, PERF-0025). Without this, `zig build bench`
+    // links against whatever optimisation the top-level `-Doptimize`
+    // selected — defaulting to Debug — which mixes safety-checked
+    // library code into hot loops and produces numbers that compare
+    // poorly across runs. Benchmarks need a stable optimisation level.
+    const bench_lib_module = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+
     const bench_exe = b.addExecutable(.{
         .name = "fts-storage-bench",
-        .root_module = benchModule(b, "benchmarks/bench.zig", target, module, framework_module),
+        .root_module = benchModule(b, "benchmarks/bench.zig", target, bench_lib_module, framework_module),
     });
     b.installArtifact(bench_exe);
     const run_bench = b.addRunArtifact(bench_exe);
@@ -164,7 +176,7 @@ pub fn build(b: *std.Build) void {
 
     const scale_bench_exe = b.addExecutable(.{
         .name = "fts-storage-scale-bench",
-        .root_module = benchModule(b, "benchmarks/scale.zig", target, module, framework_module),
+        .root_module = benchModule(b, "benchmarks/scale.zig", target, bench_lib_module, framework_module),
     });
     b.installArtifact(scale_bench_exe);
     const run_scale_bench = b.addRunArtifact(scale_bench_exe);
@@ -191,7 +203,7 @@ pub fn build(b: *std.Build) void {
 
     const micro_example_exe = b.addExecutable(.{
         .name = "fts-storage-micro-example",
-        .root_module = benchModule(b, "benchmarks/micro/example.zig", target, module, framework_module),
+        .root_module = benchModule(b, "benchmarks/micro/example.zig", target, bench_lib_module, framework_module),
     });
     const run_micro_example = b.addRunArtifact(micro_example_exe);
     if (b.args) |args| run_micro_example.addArgs(args);

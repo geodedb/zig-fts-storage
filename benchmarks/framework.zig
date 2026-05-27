@@ -41,11 +41,14 @@ pub const Scenario = struct {
     /// framework divides wall time by this to compute throughput.
     ops_per_iteration: u64 = 1,
     /// Iterations to discard before sampling (cold caches, JIT warmup,
-    /// allocator one-time setup, etc.). Defaults to 1.
-    warmup_iterations: u32 = 1,
-    /// Sample iterations to median over. Defaults to 6 for a 7-run
-    /// total. Larger values reduce noise but cost runtime.
-    sample_iterations: u32 = 6,
+    /// allocator one-time setup, etc.). Defaults to 3 — one warmup is
+    /// not enough to stabilise CPU frequency and page-cache state in
+    /// practice (PERF-0022, WRK-024).
+    warmup_iterations: u32 = 3,
+    /// Sample iterations to median over. Defaults to 30 to keep median
+    /// + p95 + p99 stable against scheduler / GC jitter (PERF-0021,
+    /// WRK-024). Larger values reduce noise but cost runtime.
+    sample_iterations: u32 = 30,
     /// Optional opaque payload forwarded to `run`.
     user_data: ?*anyopaque = null,
     /// The benchmark body.
@@ -279,7 +282,15 @@ pub fn runScenarios(
             throughput_samples[i] = opsPerSec(scenario.ops_per_iteration, w);
         }
         const tput_median = opsPerSec(scenario.ops_per_iteration, stats.p50_ns);
-        const tput_stddev = stddevF64(throughput_samples, tput_median);
+        // Mean-based stddev — stddevF64 computes deviations from its second
+        // argument, so passing the median there gave us a quantity that was
+        // neither a population stddev nor a clean dispersion metric. The
+        // reported point estimate stays median-based (less noise-sensitive),
+        // but the spread is now arithmetic-mean-based (PERF-0021, WRK-024).
+        var tput_sum: f64 = 0;
+        for (throughput_samples) |s| tput_sum += s;
+        const tput_mean = tput_sum / @as(f64, @floatFromInt(throughput_samples.len));
+        const tput_stddev = stddevF64(throughput_samples, tput_mean);
 
         const sample_count_div = @as(u64, samples);
         const row = ResultRow{
