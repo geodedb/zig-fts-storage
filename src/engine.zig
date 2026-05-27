@@ -434,6 +434,36 @@ pub const Engine = struct {
         }
     }
 
+    /// Field-Level Encryption (FLE) field-exclusion guard.
+    ///
+    /// Refuses to ingest a `TermPosting` whose `field` tag matches any entry
+    /// in `excluded_fields`. The check runs before WAL append or memtable
+    /// mutation so a rejected batch leaves the engine state unchanged
+    /// (WRK-040, GAP-0010).
+    ///
+    /// We chose explicit `error.FieldExcluded` over silent skipping because
+    /// silently dropping a sensitive field would let a misconfigured caller
+    /// believe the field was indexed when it was not — the resulting search
+    /// results would be incomplete in a way the caller could not detect.
+    /// Returning the error forces the caller to handle the policy decision
+    /// at the call site (filter, redact, or refuse) rather than rely on the
+    /// engine's silence as documentation.
+    pub fn indexDocumentExcluding(
+        self: *Engine,
+        doc_id: u64,
+        terms: []const TermPosting,
+        excluded_fields: []const []const u8,
+    ) !void {
+        for (terms) |t| {
+            if (t.field) |f| {
+                for (excluded_fields) |ef| {
+                    if (std.mem.eql(u8, f, ef)) return error.FieldExcluded;
+                }
+            }
+        }
+        return self.indexDocument(doc_id, terms);
+    }
+
     pub fn indexDocument(self: *Engine, doc_id: u64, terms: []const TermPosting) !void {
         // Validate inputs at the API boundary before any side effects
         // (SEC-EXT-0101, 0102, 0103, 0104, 0105, 0107, 0205, 0208).
@@ -1027,6 +1057,38 @@ test "AES-GCM: segment encryption roundtrip" {
         const result = Engine.initWithConfig(io, alloc, tmp_dir.dir, .{});
         try std.testing.expect(std.meta.isError(result));
     }
+}
+
+test "FLE: indexDocumentExcluding rejects excluded field" {
+    // WRK-040, GAP-0010: field-exclusion guard refuses to ingest a posting
+    // whose `field` tag matches any entry in `excluded_fields`. The error
+    // is explicit (`error.FieldExcluded`) rather than a silent skip — a
+    // silently dropped sensitive field would mask a policy misconfiguration.
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var eng = try Engine.init(io, alloc, tmp_dir.dir);
+    defer eng.deinit();
+
+    const ssn_post = TermPosting{ .term = "ssn", .positions = &[_]u32{1}, .field = "ssn" };
+    const excluded = [_][]const u8{"ssn"};
+    try std.testing.expectError(
+        error.FieldExcluded,
+        eng.indexDocumentExcluding(1, &[_]TermPosting{ssn_post}, &excluded),
+    );
+
+    // A non-excluded field is ingested normally.
+    const name_post = TermPosting{ .term = "alice", .positions = &[_]u32{2}, .field = "name" };
+    try eng.indexDocumentExcluding(2, &[_]TermPosting{name_post}, &excluded);
+    try std.testing.expect(eng.memtable.dictionary.contains("alice"));
+
+    // A null-field posting bypasses the field check (the caller did not
+    // opt into field tagging for this term).
+    const untagged = TermPosting{ .term = "untagged", .positions = &[_]u32{3} };
+    try eng.indexDocumentExcluding(3, &[_]TermPosting{untagged}, &excluded);
+    try std.testing.expect(eng.memtable.dictionary.contains("untagged"));
 }
 
 test "WAL replay drops uncommitted (no COMMIT) records" {
