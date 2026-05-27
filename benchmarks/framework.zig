@@ -193,6 +193,21 @@ pub fn printScenarios(out: *Io.Writer, scenarios: []const Scenario) !void {
 // Top-level runner
 // ============================================================================
 
+/// Run every benchmark scenario and write the aggregated rows to disk.
+///
+/// **PERF-0024 — string-lifetime contract:** internally, this function builds
+/// a `std.ArrayList(ResultRow)` whose string fields (scenario name, git SHA,
+/// host metadata captured by `captureEnv`, etc.) are slices into the
+/// allocator-owned buffers held by the local `env` and the per-scenario
+/// scratch buffers. Both are deallocated before this function returns. The
+/// rows themselves are written to the JSON / CSV output sink *before* the
+/// cleanup runs, so the on-disk artifact never references freed memory.
+///
+/// Callers who extend this code path and want to retain a `ResultRow` array
+/// beyond `runScenarios` MUST `allocator.dupe` every `[]const u8` field into
+/// a long-lived allocator first, OR pass a longer-lived allocator into
+/// `captureEnv` and the scratch helpers. Holding a `ResultRow` across the
+/// `defer env.deinit(allocator)` line will produce a dangling slice.
 pub fn runScenarios(
     allocator: std.mem.Allocator,
     io: Io,
@@ -206,6 +221,10 @@ pub fn runScenarios(
     var stderr_writer = Io.File.stderr().writer(io, &stderr_buf);
     const stderr = &stderr_writer.interface;
 
+    // PERF-0024: `env` owns the backing storage for every host-metadata
+    // string slice referenced by the rows below. `rows` MUST be drained
+    // (written to disk / serialized) before this defer fires; the slices
+    // dangle the moment env.deinit runs.
     const env = try captureEnv(allocator, io);
     defer env.deinit(allocator);
 
