@@ -19,7 +19,6 @@
 
 const std = @import("std");
 const Io = std.Io;
-const fts = @import("fts_storage");
 const framework = @import("framework");
 const utils = @import("fts_storage").utils;
 
@@ -32,6 +31,9 @@ pub fn main(init: std.process.Init) !void {
     var stderr_writer = Io.File.stderr().writer(init.io, &stderr_buf);
     const stderr = &stderr_writer.interface;
 
+    // ops_per_iteration is large because each varint call is sub-nanosecond;
+    // 100k ops keep timer granularity (Io.Clock resolution) negligible against
+    // the per-iteration wall time.
     const scenarios = [_]framework.Scenario{
         .{
             .name = "varint_encode_1byte",
@@ -86,7 +88,7 @@ fn runEncode10Byte(ctx: *framework.Context) anyerror!void {
     while (i < ctx.scenario.ops_per_iteration) : (i += 1) {
         const n = try utils.writeVarInt(&buf, std.math.maxInt(u64));
         std.mem.doNotOptimizeAway(n);
-        std.mem.doNotOptimizeAway(buf[9]);
+        std.mem.doNotOptimizeAway(buf[n - 1]);
     }
 }
 
