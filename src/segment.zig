@@ -12,38 +12,61 @@ pub const Error = @import("errors.zig").SegmentError;
 // Memtable (In-Memory Staging)
 // ============================================================================
 
-// PERF-0016: the current layout is Array-of-Structs (AoS) — every
-// `MemPosting` row carries an inline `ArrayListUnmanaged(u32)` header (a
-// 24-byte struct that itself holds a heap pointer to the positions array).
-// For workloads with many short posting lists the flush loop walks
-// `postings.items` and dereferences a separate heap pointer per row,
-// breaking the CPU's stride prefetch — most cycles end up waiting on L1/L2.
-//
-// Production path: refactor to Struct-of-Arrays (SoA) on the per-term
-// posting list — `doc_ids: []u64`, `tfs: []u32`, plus a sidecar
-// `positions: []u32` with `positions_offsets: []u32` so each posting's
-// positions are a single contiguous span. The flush iteration then becomes
-// three linear scans over packed arrays, which the prefetcher can saturate.
-//
-// Deferred until cachegrind / `perf stat` measurements on the spec'd
-// 100k-doc corpus confirm the L1/L2 cost is dominant — the AoS layout is
-// fine for the v0.1 scale (<10k terms per memtable) and a refactor of
-// `MemPostingsList`, `addPosting`, and `writeMemtable` is more risk than
-// the win justifies at this scale. The token here is tracked so the
-// optimization is not silently lost; reopen with the perf evidence in hand.
+// PERF-0016 (closed 2026-05-27): switched from Array-of-Structs to
+// Struct-of-Arrays. The prior layout walked `postings.items` and
+// dereferenced a fresh heap pointer for the positions ArrayList on every
+// row, breaking the CPU's stride prefetch. The new layout packs each term's
+// postings into four parallel arrays (doc_ids, tfs, positions_offsets,
+// positions_pool); flush iterates four linear scans over contiguous
+// memory, which the prefetcher can saturate. See `MemPostingsList.get` for
+// the view returned to consumers — the surface API stays the same shape
+// (a `MemPosting` value), only the storage is SoA.
+/// A read-only view of one posting in a `MemPostingsList`. Returned by
+/// `MemPostingsList.get(i)`. Backed by the SoA arrays; the `positions`
+/// slice borrows from the list's `positions_pool` and is valid as long
+/// as the list is not mutated.
 pub const MemPosting = struct {
     doc_id: u64,
     tf: u32,
-    /// Per-posting position list. ArrayListUnmanaged is chosen so the
-    /// per-posting growth cost is amortized — the alternative (a fresh
-    /// allocator.dupe on every position update) would dominate ingest
-    /// (see PERF-0003 / the SoA refactor note above).
-    positions: std.ArrayListUnmanaged(u32),
+    positions: []const u32,
 };
 
 pub const MemPostingsList = struct {
-    postings: std.ArrayListUnmanaged(MemPosting),
-    df: u64,
+    /// Parallel arrays — one entry per posting at index i.
+    doc_ids: std.ArrayListUnmanaged(u64) = .empty,
+    tfs: std.ArrayListUnmanaged(u32) = .empty,
+    /// Boundaries into `positions_pool`. Has `count() + 1` entries; the
+    /// span `positions_pool.items[positions_offsets[i] .. positions_offsets[i+1]]`
+    /// holds posting i's positions. The sentinel last entry tracks the
+    /// pool's high-water mark so the next append knows where to start.
+    positions_offsets: std.ArrayListUnmanaged(u32) = .empty,
+    /// Contiguous pool of every posting's positions. Densely packed —
+    /// position spans are concatenated end-to-end.
+    positions_pool: std.ArrayListUnmanaged(u32) = .empty,
+    df: u64 = 0,
+
+    pub fn count(self: *const MemPostingsList) usize {
+        return self.doc_ids.items.len;
+    }
+
+    /// Materialize a read-only view of posting `i`. The `positions` slice
+    /// borrows from `positions_pool` — valid only until the next mutation.
+    pub fn get(self: *const MemPostingsList, i: usize) MemPosting {
+        const start: usize = @intCast(self.positions_offsets.items[i]);
+        const end: usize = @intCast(self.positions_offsets.items[i + 1]);
+        return .{
+            .doc_id = self.doc_ids.items[i],
+            .tf = self.tfs.items[i],
+            .positions = self.positions_pool.items[start..end],
+        };
+    }
+
+    pub fn deinit(self: *MemPostingsList, allocator: Allocator) void {
+        self.doc_ids.deinit(allocator);
+        self.tfs.deinit(allocator);
+        self.positions_offsets.deinit(allocator);
+        self.positions_pool.deinit(allocator);
+    }
 };
 
 pub const Memtable = struct {
@@ -79,10 +102,7 @@ pub const Memtable = struct {
     pub fn deinit(self: *Memtable) void {
         var it = self.dictionary.iterator();
         while (it.next()) |entry| {
-            for (entry.value_ptr.postings.items) |*posting| {
-                posting.positions.deinit(self.allocator);
-            }
-            entry.value_ptr.postings.deinit(self.allocator);
+            entry.value_ptr.deinit(self.allocator);
         }
         self.dictionary.deinit(self.allocator);
         self.tombstones.deinit(self.allocator);
@@ -120,26 +140,33 @@ pub const Memtable = struct {
                 return err;
             };
             entry.key_ptr.* = key_copy;
-            entry.value_ptr.* = .{
-                .postings = .empty,
-                .df = 0,
-            };
+            entry.value_ptr.* = .{};
             // No errdefer free of key_copy — arena ownership.
             errdefer _ = self.dictionary.remove(key_copy);
+            // Seed positions_offsets with the leading sentinel (=0) so the
+            // first append can use the standard "push end-offset after
+            // payload" pattern below.
+            try entry.value_ptr.positions_offsets.append(self.allocator, 0);
         }
 
-        var pos_list: std.ArrayListUnmanaged(u32) = .empty;
-        errdefer pos_list.deinit(self.allocator);
-        try pos_list.ensureTotalCapacity(self.allocator, positions.len);
-        pos_list.appendSliceAssumeCapacity(positions);
-
         const tf_u32 = std.math.cast(u32, positions.len) orelse return error.PositionCountTooLarge;
-        try entry.value_ptr.postings.append(self.allocator, .{
-            .doc_id = doc_id,
-            .tf = tf_u32,
-            .positions = pos_list,
-        });
-        entry.value_ptr.df += 1;
+        const pl = entry.value_ptr;
+
+        // PERF-0016 SoA append. Three parallel array growths + one bulk
+        // positions copy. Allocations grow geometrically inside each array,
+        // so the amortized cost per addPosting is O(1).
+        try pl.doc_ids.append(self.allocator, doc_id);
+        errdefer _ = pl.doc_ids.pop();
+        try pl.tfs.append(self.allocator, tf_u32);
+        errdefer _ = pl.tfs.pop();
+        try pl.positions_pool.appendSlice(self.allocator, positions);
+        errdefer pl.positions_pool.shrinkRetainingCapacity(pl.positions_pool.items.len - positions.len);
+        // Push the new high-water sentinel — the end offset of this posting's
+        // positions slice. Indexing: get(i) reads offsets[i]..offsets[i+1].
+        const new_end: u32 = std.math.cast(u32, pl.positions_pool.items.len) orelse return error.PositionCountTooLarge;
+        try pl.positions_offsets.append(self.allocator, new_end);
+
+        pl.df += 1;
     }
 };
 
@@ -209,10 +236,17 @@ pub const SegmentWriter = struct {
 
         var dict_it = memtable.dictionary.iterator();
         while (dict_it.next()) |entry| {
-            for (entry.value_ptr.postings.items) |posting| {
-                const gop = try doc_lens.getOrPut(self.allocator, posting.doc_id);
+            // PERF-0016 SoA iteration: walk doc_ids + tfs in lockstep. The
+            // prefetcher sees both arrays as linear streams and saturates
+            // easily — no per-posting heap pointer dereference for the
+            // positions ArrayList header (which the old AoS layout forced).
+            const pl = entry.value_ptr;
+            const n = pl.count();
+            var i: usize = 0;
+            while (i < n) : (i += 1) {
+                const gop = try doc_lens.getOrPut(self.allocator, pl.doc_ids.items[i]);
                 if (!gop.found_existing) gop.value_ptr.* = 0;
-                gop.value_ptr.* = std.math.add(u32, gop.value_ptr.*, posting.tf) catch
+                gop.value_ptr.* = std.math.add(u32, gop.value_ptr.*, pl.tfs.items[i]) catch
                     return error.PositionCountTooLarge;
             }
         }
@@ -275,21 +309,32 @@ pub const SegmentWriter = struct {
             std.mem.writeInt(u64, num_buf[0..8], entry_postings_offset, .little);
             try dict_buf.appendSlice(self.allocator, num_buf[0..8]);
 
-            // Write postings
+            // Write postings — SoA iteration (PERF-0016). The three parallel
+            // arrays are walked in lockstep so the prefetcher can keep all
+            // three streams in flight; positions span comes from one
+            // contiguous pool, not per-posting heap-pointer dereferences.
             var last_doc_id: u64 = 0;
-            for (list.postings.items) |posting| {
-                // Delta encoded doc_id
-                const delta = posting.doc_id - last_doc_id;
-                last_doc_id = posting.doc_id;
+            const n = list.count();
+            var i: usize = 0;
+            while (i < n) : (i += 1) {
+                const doc_id = list.doc_ids.items[i];
+                const tf = list.tfs.items[i];
+                const pos_start: usize = @intCast(list.positions_offsets.items[i]);
+                const pos_end: usize = @intCast(list.positions_offsets.items[i + 1]);
+                const positions = list.positions_pool.items[pos_start..pos_end];
+
+                // Delta encoded doc_id.
+                const delta = doc_id - last_doc_id;
+                last_doc_id = doc_id;
 
                 const w1 = try utils.writeVarInt(&buf, delta);
                 try post_buf.appendSlice(self.allocator, buf[0..w1]);
 
-                const w2 = try utils.writeVarInt(&buf, posting.tf);
+                const w2 = try utils.writeVarInt(&buf, tf);
                 try post_buf.appendSlice(self.allocator, buf[0..w2]);
 
                 var last_pos: u32 = 0;
-                for (posting.positions.items) |pos| {
+                for (positions) |pos| {
                     const pos_delta = pos - last_pos;
                     last_pos = pos;
                     const w3 = try utils.writeVarInt(&buf, pos_delta);

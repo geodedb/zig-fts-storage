@@ -224,13 +224,16 @@ pub const TermIterator = struct {
 
             // First exhaust memtable
             if (self.mem_postings) |pl| {
-                if (self.mem_idx < pl.postings.items.len) {
-                    const posting = pl.postings.items[self.mem_idx];
+                if (self.mem_idx < pl.count()) {
+                    // PERF-0016 SoA view — `pl.get(i)` returns a MemPosting
+                    // with `positions` borrowed from positions_pool. Valid
+                    // for the duration of this iteration.
+                    const posting = pl.get(self.mem_idx);
                     self.mem_idx += 1;
                     const score = self.computeScore(posting.doc_id, posting.tf);
                     match = Match{
                         .doc_id = posting.doc_id,
-                        .positions = posting.positions.items,
+                        .positions = posting.positions,
                         .score = score,
                     };
                 }

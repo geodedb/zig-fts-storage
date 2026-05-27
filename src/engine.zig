@@ -991,7 +991,9 @@ pub const Engine = struct {
             var sum: u64 = 0;
             var it = self.memtable.dictionary.iterator();
             while (it.next()) |entry| {
-                for (entry.value_ptr.postings.items) |p| sum += p.tf;
+                // PERF-0016 SoA: sum tfs directly off the parallel tfs array;
+                // no need to materialize a MemPosting view per row.
+                for (entry.value_ptr.tfs.items) |tf| sum += tf;
             }
             break :blk sum;
         };
