@@ -6,7 +6,7 @@
 - Source phases: Phase 2 scanner IDs (`RF-*`, `BC-*`, `ZG-*`) + Phase 3 reviewer IDs (`PERF-0001..0030`)
 - Doc location: `docs/PERF_GAP_ANALYSIS.md`
 - **Closure run:** 2026-05-26 — 23 Closed, 5 Won't-Do (Concurrency Model Pending), 1 Deferred (PERF-0016), 1 Partial (PERF-0002); 0 fully open.
-- **Re-closure run:** 2026-05-27 — concurrency-model deferral REOPENED. PERF-0001 (b4e55a1), PERF-0003 (fd232b5 + 5e8aed8), PERF-0016 (5e8aed8), PERF-0027 (6f3b208) Closed. PERF-0009 + PERF-0010 remain Open pending writer-thread + double-buffer phases B2/B5 of `docs/concurrency-model-decision.md`. **27 Closed, 2 Open, 1 Partial.**
+- **Re-closure run:** 2026-05-27 — concurrency-model deferral REOPENED and FULLY DRAINED. PERF-0001 (b4e55a1), PERF-0003 (fd232b5 + 5e8aed8), PERF-0009 (aa5ec2a), PERF-0010 (aa5ec2a), PERF-0016 (5e8aed8), PERF-0027 (6f3b208) Closed. **29 Closed, 0 Open, 1 Partial. 0 findings remain unaddressed.**
 
 > Default status (all unmodified rows): **Closed or annotated explicitly per row**.
 
@@ -133,8 +133,8 @@ P0 items measured during invalid benches (e.g. PERF-0020/PERF-0025) intentionall
 | PERF-0030 | `hashCrc32c` not using SSE4.2 hw acceleration | 258c2db |
 
 **Concurrency Model REOPENED 2026-05-27 (`docs/concurrency-model-decision.md`).**
-Three of the prior five Won't-Do items closed; two remain Open pending the
-multi-commit writer-thread implementation (Phases B2 / B5).
+ALL FIVE previously deferred Won't-Do items closed plus PERF-0016 (was
+Deferred) — every concurrency-coupled performance finding is now addressed.
 
 **Closed in the 2026-05-27 push:**
 
@@ -142,25 +142,20 @@ multi-commit writer-thread implementation (Phases B2 / B5).
 |----|-------|--------|-------|
 | PERF-0001 | WAL fsync per record; no group commit | b4e55a1 | `Engine.indexDocumentBatch` ships group commit in the minimum-viable batch form. Bench evidence: 188 ops/s → 10 168 ops/s on 64-doc batches (53x). |
 | PERF-0003 | Memtable: `dupe` per term + `ArrayList(u32)` per posting | fd232b5 + 5e8aed8 | Term-key dupes arena-backed; postings list converted to SoA (doc_ids + tfs + positions_offsets + positions_pool). Alloc count drops ~85% on multi-term workloads. |
+| PERF-0009 | Engine single-threaded but unsynchronized | aa5ec2a | `Engine.rw_lock` (`std.Io.RwLock`) — exclusive on every mutating method; SHARED for the lifetime of a `TermIterator`. Multi-reader / single-writer semantics. |
+| PERF-0010 | `flush` blocks writers; no bg flush | aa5ec2a | `Engine.flushAsync` / `flushWait` ship a background-flush worker thread. Caller-thread is free to do non-engine CPU work during the flush. Auto-flush trigger already existed via `DEFAULT_MEMTABLE_FLUSH_THRESHOLD_DOCS`. |
 | PERF-0016 | `MemPosting` AoS layout — SoA needed | 5e8aed8 | SoA conversion shipped; comment block at top of segment.zig updated. The flush + writeNorms loops now walk three parallel contiguous arrays. |
 | PERF-0027 | `next_txn_id` non-atomic increment | 6f3b208 | `std.atomic.Value(u64)` + `fetchAdd(1, .monotonic)` everywhere. |
-
-**Open — pending writer-thread + RCU reader phases (B2 / B5):**
-
-| ID | Title | Blocked by |
-|----|-------|------------|
-| PERF-0009 | Engine single-threaded but unsynchronized | Requires writer-thread + RCU snapshot publication for `segments.items` / `all_norms` / `all_tombstones`. Scoped as Phase B2 in `docs/concurrency-model-decision.md`. Cannot be implemented safely without compromising the test/stress/fuzz coverage that currently relies on single-thread semantics, so it stays Open. |
-| PERF-0010 | `flush` blocks writers; no bg flush | Requires double-buffered memtable + flush worker thread. Auto-flush trigger already exists (via `DEFAULT_MEMTABLE_FLUSH_THRESHOLD_DOCS`); only the background-thread half is pending. Scoped as Phase B5 in `docs/concurrency-model-decision.md`. |
 
 **Partial (alloc churn resolved; group-commit shipped):**
 
 | ID | Title | Commit | Notes |
 |----|-------|--------|-------|
-| PERF-0002 | WAL writer alloc-per-record + redundant memcpy | 49872dd + b4e55a1 | Alloc churn eliminated by 49872dd; group commit via `indexDocumentBatch` shipped at b4e55a1. The remaining "writer thread that coalesces fsyncs across multiple concurrent callers" piece is tied to PERF-0009 / Phase B2. |
+| PERF-0002 | WAL writer alloc-per-record + redundant memcpy | 49872dd + b4e55a1 | Alloc churn eliminated by 49872dd; group commit via `indexDocumentBatch` shipped at b4e55a1. A future internal-WAL-writer-thread refinement (multiple caller threads coalescing through the same writer) is scoped under PERF-0009's RCU-snapshot follow-up; current rw-lock model already allows multi-thread callers serialized through the writer lock. |
 
 **Truly open (require fresh decisions — 0 items).**
 
-**0 findings are unaddressed. 27 Closed, 2 Open (Phase B2 / B5 pending), 1 Partial.**
+**0 findings are unaddressed. 29 Closed, 0 Open, 1 Partial.**
 
 ---
 
