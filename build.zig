@@ -266,10 +266,20 @@ pub fn build(b: *std.Build) void {
     const micro_bm25_step = b.step("bench-micro-bm25", "BM25 scoring micro-benchmarks");
     micro_bm25_step.dependOn(&run_micro_bm25.step);
 
+    const micro_wal_record_exe = b.addExecutable(.{
+        .name = "fts-storage-micro-wal-record",
+        .root_module = benchModule(b, "benchmarks/micro/wal_record.zig", target, bench_lib_module, framework_module),
+    });
+    const run_micro_wal_record = b.addRunArtifact(micro_wal_record_exe);
+    if (b.args) |args| run_micro_wal_record.addArgs(args);
+    const micro_wal_record_step = b.step("bench-micro-wal-record", "WAL record serialize micro-benchmark");
+    micro_wal_record_step.dependOn(&run_micro_wal_record.step);
+
     const micro_all_step = b.step("bench-micro", "Run all micro-benchmarks");
     micro_all_step.dependOn(&run_micro_example.step);
     micro_all_step.dependOn(&run_micro_varint.step);
     micro_all_step.dependOn(&run_micro_bm25.step);
+    micro_all_step.dependOn(&run_micro_wal_record.step);
 
     const tools_step = b.step("tools", "Build benchmark tooling artifacts");
     tools_step.dependOn(&bench_exe.step);
@@ -278,6 +288,7 @@ pub fn build(b: *std.Build) void {
     tools_step.dependOn(&micro_example_exe.step);
     tools_step.dependOn(&micro_varint_exe.step);
     tools_step.dependOn(&micro_bm25_exe.step);
+    tools_step.dependOn(&micro_wal_record_exe.step);
 }
 
 fn benchModule(
