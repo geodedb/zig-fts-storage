@@ -101,8 +101,14 @@ include:
     job_suffix: "-stress"
     test_step: "test-stress"
 
-  # Fuzz sweep (advisory). fuzz_duration is the in-shell SIGINT
-  # budget; timeout: is GitLab's job cap.
+  # Fuzz sweep (SEC-EXT-0504, advisory). fuzz_duration is the in-shell SIGINT
+  # budget; timeout: is GitLab's job cap. Pairs with the deterministic
+  # adversarial-corpus harness in tests/fuzz_targets.zig (run locally via
+  # `zig build test-fuzz`) — that file enumerates the public deserializers
+  # this sweep should exercise (Manifest.deserialize, WalRecord.deserialize,
+  # readVarInt). allow_failure stays true while the budget is bounded to
+  # 60s on every push; promotion to a required gate is tracked alongside
+  # a default-branch nightly extension.
 - component: gitlab.com/devnw/ci-catalog/zig-fuzz@v1.22.0
   inputs:
     zig_version: "0.16.0"

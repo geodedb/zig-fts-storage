@@ -117,10 +117,24 @@ pub fn build(b: *std.Build) void {
     if (tsan) stress_tests.root_module.sanitize_thread = true;
     stress_step.dependOn(&b.addRunArtifact(stress_tests).step);
 
+    // Adversarial deserializer harness (SEC-EXT-0504). A small, deterministic
+    // corpus of malformed inputs aimed at every public byte-driven decoder
+    // (Manifest.deserialize, WalRecord.deserialize, readVarInt). Pairs with
+    // the coverage-guided `zig-fuzz` CI component, which uses the same entry
+    // points under `zig test --fuzz`. Kept as a separate step so the regular
+    // test pipeline stays fast and the fuzz pipeline stays advisory.
+    const fuzz_step = b.step("test-fuzz", "Run adversarial deserializer fuzz harnesses");
+    const fuzz_tests = b.addTest(.{
+        .root_module = importedModule(b, "tests/fuzz_targets.zig", target, optimize, module),
+    });
+    if (tsan) fuzz_tests.root_module.sanitize_thread = true;
+    fuzz_step.dependOn(&b.addRunArtifact(fuzz_tests).step);
+
     const all_tests_step = b.step("test-all", "Run unit, integration, and stress suites");
     all_tests_step.dependOn(&b.addRunArtifact(unit_tests).step);
     all_tests_step.dependOn(&b.addRunArtifact(integration_tests).step);
     all_tests_step.dependOn(&b.addRunArtifact(stress_tests).step);
+    all_tests_step.dependOn(&b.addRunArtifact(fuzz_tests).step);
 
     // ------------------------------------------------------------------
     // Example — demonstrates library usage end-to-end.
