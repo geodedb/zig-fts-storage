@@ -593,6 +593,94 @@ pub const Engine = struct {
         self.memtable.deinit();
         self.memtable = segment.Memtable.init(self.allocator);
     }
+
+    /// Manually merge every existing segment into one. Tombstoned docs are
+    /// folded into the merged segment by exclusion (they simply don't appear
+    /// in any posting list of the new segment), so the engine-wide tombstone
+    /// set can be cleared afterwards.
+    ///
+    /// This is the minimum-viable form of WRK-041 (GAP-0003). Background
+    /// scheduling, leveled compaction (L0 -> L1 -> ...), and concurrent
+    /// query stability during compaction are explicitly deferred. The new
+    /// merged segment is marked `level = 1` to distinguish it from raw
+    /// flushed memtables; future tiered compaction can rely on this.
+    ///
+    /// No-op if fewer than 2 segments exist.
+    pub fn compact(self: *Engine) !void {
+        if (self.segments.items.len <= 1) return;
+
+        // Build a fresh in-memory memtable holding every (term, doc_id,
+        // positions) tuple from the existing segments, skipping any doc_id
+        // present in the engine-wide tombstone set.
+        var merged_mt = segment.Memtable.init(self.allocator);
+        defer merged_mt.deinit();
+
+        for (self.segments.items) |*seg_reader| {
+            var term_it = seg_reader.dictionary.iterator();
+            while (term_it.next()) |entry| {
+                const term = entry.key_ptr.*;
+                if (try seg_reader.search(term)) |iter_val| {
+                    var post_it = iter_val;
+                    defer post_it.deinit();
+                    while (try post_it.next()) |posting| {
+                        if (self.all_tombstones.contains(posting.doc_id)) continue;
+                        try merged_mt.addPosting(term, posting.doc_id, posting.positions);
+                    }
+                }
+            }
+        }
+
+        // Write the merged memtable as a new segment. Use a counter-derived
+        // segment id (matches `flush`'s naming scheme) so the on-disk path
+        // never collides with a pre-existing seg_*.
+        const new_segment_id = self.current_manifest.counter + 1;
+        var writer = segment.SegmentWriter{
+            .io = self.io,
+            .dir = self.seg_dir,
+            .allocator = self.allocator,
+            .segment_id = new_segment_id,
+        };
+        try writer.writeMemtable(&merged_mt);
+
+        // Snapshot old segment ids so we can delete their on-disk directories
+        // after the manifest swap commits.
+        const old_segments_to_delete = try self.allocator.alloc(u64, self.current_manifest.segments.items.len);
+        defer self.allocator.free(old_segments_to_delete);
+        for (self.current_manifest.segments.items, 0..) |s, i| old_segments_to_delete[i] = s.id;
+
+        // Replace the manifest's segment list with just the merged entry.
+        self.current_manifest.segments.clearRetainingCapacity();
+        try self.current_manifest.segments.append(self.allocator, .{
+            .id = new_segment_id,
+            .doc_count = merged_mt.total_docs,
+            .tombstone_count = 0,
+            .created_lsn = self.next_txn_id - 1,
+            .level = 1,
+        });
+        self.current_manifest.counter += 1;
+        const man_file = if (self.current_manifest.counter % 2 == 0) "manifest.a" else "manifest.b";
+        try self.current_manifest.writeToFile(self.io, self.dir, man_file, self.allocator);
+
+        // Close old SegmentReaders, open the new merged one.
+        for (self.segments.items) |*sr| sr.deinit();
+        self.segments.clearRetainingCapacity();
+        const new_reader = try segment.SegmentReader.init(self.io, self.allocator, self.seg_dir, new_segment_id);
+        try self.segments.append(self.allocator, new_reader);
+
+        // Delete old segment directories. Best-effort: failure to delete a
+        // stale directory does not invalidate the merged segment, it just
+        // leaks disk space until the next process boot can clean up.
+        for (old_segments_to_delete) |sid| {
+            var name_buf: [32]u8 = undefined;
+            const seg_name = std.fmt.bufPrint(&name_buf, "seg_{d}", .{sid}) catch continue;
+            self.seg_dir.deleteTree(self.io, seg_name) catch {};
+        }
+
+        // Aggregated tombstones are now baked into the merged segment by
+        // exclusion, so drop them.
+        self.all_tombstones.deinit(self.allocator);
+        self.all_tombstones = .empty;
+    }
 };
 
 // ============================================================================
