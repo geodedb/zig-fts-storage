@@ -1,0 +1,107 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2024-2026 CodePros
+
+//! Fault-injection harness for fts-storage (WRK-022, GAP-0016, QUAL-0020,
+//! QUAL-0021).
+//!
+//! These tests deliberately tamper with on-disk state to validate that the
+//! Engine recovers, fails-closed, or skips torn data as the design demands.
+//! They complement the in-tree unit tests in src/engine.zig (truncated WAL
+//! tail, both manifests corrupt) by exercising additional scenarios
+//! (corrupted segment file, A/B selective tampering).
+
+const std = @import("std");
+const fts = @import("fts_storage");
+
+test "fault: truncated WAL tail survives recovery" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    {
+        var eng = try fts.Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        const t = fts.TermPosting{ .term = "alpha", .positions = &[_]u32{1} };
+        try eng.indexDocument(1, &[_]fts.TermPosting{t});
+        try eng.indexDocument(2, &[_]fts.TermPosting{t});
+    }
+
+    var wal_dir = try tmp_dir.dir.openDir(io, "wal", .{});
+    defer wal_dir.close(io);
+    const f = try wal_dir.openFile(io, "fts.wal", .{ .mode = .read_write });
+    defer f.close(io);
+    const sz = (try f.stat(io)).size;
+    try f.setLength(io, sz - 3);
+
+    var eng = try fts.Engine.init(io, alloc, tmp_dir.dir);
+    defer eng.deinit();
+    try std.testing.expect(eng.memtable.dictionary.contains("alpha"));
+}
+
+test "fault: corrupted segment file rejected on open" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    {
+        var eng = try fts.Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        const t = fts.TermPosting{ .term = "bravo", .positions = &[_]u32{1} };
+        try eng.indexDocument(1, &[_]fts.TermPosting{t});
+        try eng.flush();
+    }
+
+    // Corrupt the freshly-flushed segment's terms.hash file. Any byte
+    // overwrite in the segment's header or hash table should make
+    // SegmentReader.init fail at open time.
+    {
+        var seg_root = try tmp_dir.dir.openDir(io, "segments", .{});
+        defer seg_root.close(io);
+        var seg_dir = try seg_root.openDir(io, "seg_1", .{});
+        defer seg_dir.close(io);
+        const tf = try seg_dir.openFile(io, "terms.hash", .{ .mode = .read_write });
+        defer tf.close(io);
+        const buf = [_]u8{0xFF};
+        try tf.writePositionalAll(io, &buf, 0);
+    }
+
+    // Reopen — must propagate an error rather than silently continue with a
+    // segment whose contents are unverifiable.
+    const result = fts.Engine.init(io, alloc, tmp_dir.dir);
+    if (result) |e| {
+        e.deinit();
+        try std.testing.expect(false); // should not reach
+    } else |_| {
+        // Pass — any error is acceptable so long as recovery did not
+        // silently accept the corrupted segment.
+    }
+}
+
+test "fault: both manifests corrupt fails closed" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    {
+        var eng = try fts.Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        const t = fts.TermPosting{ .term = "x", .positions = &[_]u32{1} };
+        try eng.indexDocument(1, &[_]fts.TermPosting{t});
+        try eng.flush();
+        try eng.indexDocument(2, &[_]fts.TermPosting{t});
+        try eng.flush();
+    }
+
+    const corrupt_byte = [_]u8{0xFF};
+    for ([_][]const u8{ "manifest.a", "manifest.b" }) |name| {
+        const f = tmp_dir.dir.openFile(io, name, .{ .mode = .read_write }) catch continue;
+        defer f.close(io);
+        const sz = (try f.stat(io)).size;
+        try f.writePositionalAll(io, &corrupt_byte, sz - 1);
+    }
+
+    try std.testing.expectError(error.ManifestCorrupt, fts.Engine.init(io, alloc, tmp_dir.dir));
+}

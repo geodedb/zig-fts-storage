@@ -62,8 +62,14 @@ pub const Engine = struct {
         engine.io = io;
         engine.dir = base_dir;
         engine.memtable = segment.Memtable.init(allocator);
+        errdefer engine.memtable.deinit();
         engine.segments = .empty;
+        errdefer {
+            for (engine.segments.items) |*seg_reader| seg_reader.deinit();
+            engine.segments.deinit(allocator);
+        }
         engine.all_tombstones = .empty;
+        errdefer engine.all_tombstones.deinit(allocator);
 
         // Ensure subdirectories exist. Dir mode 0o700 (owner-only) keeps the
         // WAL and segment data unreadable to other local users on POSIX
@@ -77,7 +83,9 @@ pub const Engine = struct {
         };
 
         engine.wal_dir = try base_dir.openDir(io, "wal", .{});
+        errdefer engine.wal_dir.close(io);
         engine.seg_dir = try base_dir.openDir(io, "segments", .{});
+        errdefer engine.seg_dir.close(io);
 
         // Load Manifest A/B. Distinguish between "absent" (FileNotFound) and
         // "corrupt" (any other deserialize failure). A present-but-corrupt
@@ -91,6 +99,7 @@ pub const Engine = struct {
         } else {
             engine.current_manifest = try manifest.Manifest.selectManifest(man_a, man_b);
         }
+        errdefer engine.current_manifest.deinit(allocator);
 
         // Deinit whichever manifest was not selected
         if (man_a) |m| {
@@ -106,7 +115,10 @@ pub const Engine = struct {
             }
         }
 
-        // Load segments
+        // Load segments. Each successful SegmentReader is appended to
+        // engine.segments before the next is attempted, so the errdefer
+        // above will tear down whatever was loaded if a later segment
+        // fails to open (WRK-022).
         try engine.segments.ensureTotalCapacity(allocator, engine.current_manifest.segments.items.len);
         for (engine.current_manifest.segments.items) |seg_entry| {
             const seg_reader = try segment.SegmentReader.init(io, allocator, engine.seg_dir, seg_entry.id);
@@ -138,6 +150,7 @@ pub const Engine = struct {
             .truncate = false,
             .permissions = utils.fileMode(0o600),
         });
+        errdefer engine.wal_file.close(io);
         engine.wal_writer = try wal.WalWriter.init(io, engine.wal_file, allocator);
 
         return engine;

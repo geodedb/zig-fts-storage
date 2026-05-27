@@ -98,6 +98,16 @@ pub fn build(b: *std.Build) void {
     if (tsan) integration_tests.root_module.sanitize_thread = true;
     integration_step.dependOn(&b.addRunArtifact(integration_tests).step);
 
+    // Fault-injection harness (WRK-022, GAP-0016, QUAL-0020, QUAL-0021).
+    // Co-runs with the integration suite so a single `test-integration`
+    // invocation exercises both the happy path and the deliberate-tamper
+    // scenarios.
+    const fault_tests = b.addTest(.{
+        .root_module = importedModule(b, "tests/fault_injection.zig", target, optimize, module),
+    });
+    if (tsan) fault_tests.root_module.sanitize_thread = true;
+    integration_step.dependOn(&b.addRunArtifact(fault_tests).step);
+
     // Stress runs Debug under TSan so races aren't optimised away.
     const stress_optimize: std.builtin.OptimizeMode = if (tsan) .Debug else .ReleaseFast;
     const stress_step = b.step("test-stress", "Run stress and load tests");

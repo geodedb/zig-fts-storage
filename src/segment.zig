@@ -274,6 +274,17 @@ pub const SegmentReader = struct {
             .seg_dir = seg_dir,
             .postings_file = postings_file,
         };
+        // If load() fails partway (corrupted terms.hash, truncated payload),
+        // any dictionary entries / capacity already allocated must be torn
+        // down or the caller leaks (WRK-022).
+        errdefer {
+            var it = seg.dictionary.iterator();
+            while (it.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+            }
+            seg.dictionary.deinit(allocator);
+            seg.tombstones.deinit(allocator);
+        }
         try seg.load();
         return seg;
     }
