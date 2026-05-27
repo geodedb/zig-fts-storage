@@ -132,20 +132,21 @@ pub const SegmentWriter = struct {
     }
 
     fn writeDictionaryAndPostings(self: *SegmentWriter, seg_dir: *std.Io.Dir, memtable: *Memtable) !void {
-        // We will write `terms.fst` (a flat hash map for now) and `postings.bin`.
-        const dict_file = try seg_dir.createFile(self.io, "terms.hash", .{ .permissions = utils.fileMode(0o600) });
-        defer dict_file.close(self.io);
-
-        const post_file = try seg_dir.createFile(self.io, "postings.bin", .{ .permissions = utils.fileMode(0o600) });
-        defer post_file.close(self.io);
+        // Build the entire dictionary and postings payloads in memory, then
+        // issue exactly one writeStreamingAll per file (PERF-0004, WRK-034).
+        // For a segment with 100k terms this turns millions of tiny syscalls
+        // into two large ones.
+        var dict_buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer dict_buf.deinit(self.allocator);
+        var post_buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer post_buf.deinit(self.allocator);
 
         // We use explicit buffers for std.mem.writeInt instead of writer.writeInt
         var num_buf: [8]u8 = undefined;
-        var post_offset: u64 = 0;
 
         // Write number of terms
         std.mem.writeInt(u32, num_buf[0..4], @intCast(memtable.dictionary.count()), .little);
-        try dict_file.writeStreamingAll(self.io, num_buf[0..4]);
+        try dict_buf.appendSlice(self.allocator, num_buf[0..4]);
 
         var buf: [32]u8 = undefined;
         var it = memtable.dictionary.iterator();
@@ -155,48 +156,56 @@ pub const SegmentWriter = struct {
 
             // Write term len + term
             std.mem.writeInt(u16, num_buf[0..2], @intCast(term.len), .little);
-            try dict_file.writeStreamingAll(self.io, num_buf[0..2]);
-            try dict_file.writeStreamingAll(self.io, term);
+            try dict_buf.appendSlice(self.allocator, num_buf[0..2]);
+            try dict_buf.appendSlice(self.allocator, term);
 
             // Write df
             std.mem.writeInt(u64, num_buf[0..8], list.df, .little);
-            try dict_file.writeStreamingAll(self.io, num_buf[0..8]);
+            try dict_buf.appendSlice(self.allocator, num_buf[0..8]);
 
-            // Write postings offset
-            std.mem.writeInt(u64, num_buf[0..8], post_offset, .little);
-            try dict_file.writeStreamingAll(self.io, num_buf[0..8]);
+            // Postings offset is the current length of post_buf BEFORE we
+            // append this term's posting bytes (WRK-034).
+            const entry_postings_offset: u64 = @intCast(post_buf.items.len);
+            std.mem.writeInt(u64, num_buf[0..8], entry_postings_offset, .little);
+            try dict_buf.appendSlice(self.allocator, num_buf[0..8]);
 
             // Write postings
             var last_doc_id: u64 = 0;
-            var bytes_written: u64 = 0;
             for (list.postings.items) |posting| {
                 // Delta encoded doc_id
                 const delta = posting.doc_id - last_doc_id;
                 last_doc_id = posting.doc_id;
 
                 const w1 = try utils.writeVarInt(&buf, delta);
-                try post_file.writeStreamingAll(self.io, buf[0..w1]);
-                bytes_written += w1;
+                try post_buf.appendSlice(self.allocator, buf[0..w1]);
 
                 const w2 = try utils.writeVarInt(&buf, posting.tf);
-                try post_file.writeStreamingAll(self.io, buf[0..w2]);
-                bytes_written += w2;
+                try post_buf.appendSlice(self.allocator, buf[0..w2]);
 
                 var last_pos: u32 = 0;
                 for (posting.positions.items) |pos| {
                     const pos_delta = pos - last_pos;
                     last_pos = pos;
                     const w3 = try utils.writeVarInt(&buf, pos_delta);
-                    try post_file.writeStreamingAll(self.io, buf[0..w3]);
-                    bytes_written += w3;
+                    try post_buf.appendSlice(self.allocator, buf[0..w3]);
                 }
             }
-            // Write postings len
-            std.mem.writeInt(u64, num_buf[0..8], bytes_written, .little);
-            try dict_file.writeStreamingAll(self.io, num_buf[0..8]);
 
-            post_offset += bytes_written;
+            // Write postings len for this term (derived from current post_buf
+            // length minus the offset captured above).
+            const bytes_written: u64 = @as(u64, @intCast(post_buf.items.len)) - entry_postings_offset;
+            std.mem.writeInt(u64, num_buf[0..8], bytes_written, .little);
+            try dict_buf.appendSlice(self.allocator, num_buf[0..8]);
         }
+
+        // Single writeStreamingAll per file (PERF-0004).
+        const dict_file = try seg_dir.createFile(self.io, "terms.hash", .{ .permissions = utils.fileMode(0o600) });
+        defer dict_file.close(self.io);
+        const post_file = try seg_dir.createFile(self.io, "postings.bin", .{ .permissions = utils.fileMode(0o600) });
+        defer post_file.close(self.io);
+
+        try dict_file.writeStreamingAll(self.io, dict_buf.items);
+        try post_file.writeStreamingAll(self.io, post_buf.items);
     }
 
     fn writeTombstones(self: *SegmentWriter, seg_dir: *std.Io.Dir, memtable: *Memtable) !void {
