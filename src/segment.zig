@@ -229,6 +229,11 @@ pub const SegmentReader = struct {
     segment_id: u64,
     dictionary: std.StringHashMapUnmanaged(DictEntry),
     tombstones: std.AutoHashMapUnmanaged(u64, void),
+    /// Cached open handles so search() does not pay an openDir + openFile +
+    /// close per query (PERF-0005, PERF-0007, WRK-033). Opened in init,
+    /// released in deinit.
+    seg_dir: std.Io.Dir,
+    postings_file: std.Io.File,
 
     // Dictionary cached in memory for fast lookup
     pub const DictEntry = struct {
@@ -238,6 +243,18 @@ pub const SegmentReader = struct {
     };
 
     pub fn init(io: std.Io, allocator: Allocator, dir: std.Io.Dir, segment_id: u64) !SegmentReader {
+        // Open the segment's own subdirectory once. We hold this for the
+        // reader's lifetime so search() does not have to reopen it per query.
+        var seg_dir_name_buf: [64]u8 = undefined;
+        const seg_dir_name = try std.fmt.bufPrint(&seg_dir_name_buf, "seg_{d}", .{segment_id});
+        var seg_dir = try dir.openDir(io, seg_dir_name, .{});
+        errdefer seg_dir.close(io);
+
+        // SEC-EXT-0301: O_NOFOLLOW on postings.bin too. Opened once at init
+        // and held for the reader's lifetime (WRK-033).
+        const postings_file = try seg_dir.openFile(io, "postings.bin", .{ .follow_symlinks = false });
+        errdefer postings_file.close(io);
+
         var seg = SegmentReader{
             .io = io,
             .dir = dir,
@@ -245,12 +262,16 @@ pub const SegmentReader = struct {
             .segment_id = segment_id,
             .dictionary = .empty,
             .tombstones = .empty,
+            .seg_dir = seg_dir,
+            .postings_file = postings_file,
         };
         try seg.load();
         return seg;
     }
 
     pub fn deinit(self: *SegmentReader) void {
+        self.postings_file.close(self.io);
+        self.seg_dir.close(self.io);
         var it = self.dictionary.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -314,20 +335,14 @@ pub const SegmentReader = struct {
             if (entry.postings_len > limits.MAX_POSTINGS_BYTES) return error.PostingsTooLarge;
             const postings_len_usize = std.math.cast(usize, entry.postings_len) orelse return error.PostingsTooLarge;
             const data = try self.allocator.alloc(u8, postings_len_usize);
-            var seg_dir_name_buf: [64]u8 = undefined;
-            const seg_dir_name = try std.fmt.bufPrint(&seg_dir_name_buf, "seg_{d}", .{self.segment_id});
-            var seg_dir = try self.dir.openDir(self.io, seg_dir_name, .{});
-            defer seg_dir.close(self.io);
+            errdefer self.allocator.free(data);
 
-            // SEC-EXT-0301: O_NOFOLLOW — segment files are owner-only-perms;
-            // refuse to follow symlinks so a malicious actor with write
-            // access to the segments tree cannot redirect reads.
-            const file = try seg_dir.openFile(self.io, "postings.bin", .{ .follow_symlinks = false });
-            defer file.close(self.io);
-
+            // Use the cached postings.bin handle opened in init (WRK-033) so
+            // we do not pay an openDir + openFile + close per query
+            // (PERF-0005, PERF-0007).
             var index: usize = 0;
             while (index < data.len) {
-                const amt = try file.readPositional(self.io, &.{data[index..]}, entry.postings_offset + index);
+                const amt = try self.postings_file.readPositional(self.io, &.{data[index..]}, entry.postings_offset + index);
                 if (amt == 0) return error.Incomplete;
                 index += amt;
             }
@@ -370,13 +385,11 @@ pub const SegmentReader = struct {
     }
 
     fn load(self: *SegmentReader) !void {
-        var seg_dir_name_buf: [64]u8 = undefined;
-        const seg_dir_name = try std.fmt.bufPrint(&seg_dir_name_buf, "seg_{d}", .{self.segment_id});
-        var seg_dir = try self.dir.openDir(self.io, seg_dir_name, .{});
-        defer seg_dir.close(self.io);
+        // Reuse the seg_dir handle opened in init rather than opening a new
+        // one (WRK-033). The cached handle is also used by search().
 
         // Load dictionary — refuse to follow symlinks (SEC-EXT-0301).
-        if (seg_dir.openFile(self.io, "terms.hash", .{ .follow_symlinks = false })) |file| {
+        if (self.seg_dir.openFile(self.io, "terms.hash", .{ .follow_symlinks = false })) |file| {
             defer file.close(self.io);
 
             const count = readU32FromFile(file, self.io) catch 0;
@@ -408,7 +421,7 @@ pub const SegmentReader = struct {
         }
 
         // Load tombstones — refuse to follow symlinks (SEC-EXT-0301).
-        if (seg_dir.openFile(self.io, "tombstones.bin", .{ .follow_symlinks = false })) |file| {
+        if (self.seg_dir.openFile(self.io, "tombstones.bin", .{ .follow_symlinks = false })) |file| {
             defer file.close(self.io);
             const count = readU32FromFile(file, self.io) catch 0;
             if (count > limits.MAX_TOMBSTONES_PER_SEGMENT) return error.TombstoneCountTooLarge;
