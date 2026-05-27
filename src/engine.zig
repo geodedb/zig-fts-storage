@@ -88,11 +88,18 @@ pub const Engine = struct {
         errdefer engine.seg_dir.close(io);
 
         // Load Manifest A/B. Distinguish between "absent" (FileNotFound) and
-        // "corrupt" (any other deserialize failure). A present-but-corrupt
-        // manifest must fail closed rather than silently start fresh, which
-        // would silently lose every previously flushed segment.
-        const man_a = try loadManifestOptional(io, allocator, base_dir, "manifest.a");
-        const man_b = try loadManifestOptional(io, allocator, base_dir, "manifest.b");
+        // "corrupt" (any other deserialize failure). The A/B rotation is
+        // designed so that one corrupt slot does not block recovery — fall
+        // back to the still-valid copy. Only if BOTH are corrupt do we fail
+        // closed, since silently starting fresh would drop every previously
+        // flushed segment (WRK-023, GAP-0028, SEC-EXT-0304).
+        const res_a = loadManifestResult(io, allocator, base_dir, "manifest.a");
+        const res_b = loadManifestResult(io, allocator, base_dir, "manifest.b");
+
+        if (res_a == .corrupt and res_b == .corrupt) return error.ManifestCorrupt;
+
+        const man_a: ?manifest.Manifest = if (res_a == .ok) res_a.ok else null;
+        const man_b: ?manifest.Manifest = if (res_b == .ok) res_b.ok else null;
 
         if (man_a == null and man_b == null) {
             engine.current_manifest = manifest.Manifest{};
@@ -188,27 +195,41 @@ pub const Engine = struct {
         return try manifest.Manifest.deserialize(allocator, data);
     }
 
-    /// Returns null only for FileNotFound. Any other error (checksum mismatch,
-    /// invalid magic, truncated payload, oversize manifest) is mapped to
-    /// error.ManifestCorrupt so a present-but-corrupt manifest fails closed
-    /// instead of being silently treated as "no manifest" (QUAL-0004,
-    /// SEC-EXT-0305).
-    fn loadManifestOptional(
+    /// Three-state result for a single manifest slot. Used by Engine.init to
+    /// distinguish "absent" from "present but corrupt" so the A/B rotation
+    /// can fall back to the surviving copy when only one slot is damaged
+    /// (WRK-023, GAP-0028).
+    const ManifestLoadResult = union(enum) {
+        /// File opened, parsed, and CRC-validated successfully.
+        ok: manifest.Manifest,
+        /// File did not exist on disk (FileNotFound). Normal on first boot.
+        absent,
+        /// File existed but failed to parse (bad CRC, bad magic, truncated,
+        /// or oversize). Caller decides whether to fail closed (both slots
+        /// corrupt) or fall through (other slot still valid).
+        corrupt,
+    };
+
+    fn loadManifestResult(
         io: std.Io,
         allocator: Allocator,
         dir: std.Io.Dir,
         path: []const u8,
-    ) !?manifest.Manifest {
-        return loadManifest(io, allocator, dir, path) catch |err| switch (err) {
-            error.FileNotFound => null,
-            error.ChecksumMismatch,
-            error.InvalidData,
-            error.InvalidMagic,
-            error.ManifestTooLarge,
-            error.SegmentCountTooLarge,
-            => error.ManifestCorrupt,
-            else => |e| e,
-        };
+    ) ManifestLoadResult {
+        if (loadManifest(io, allocator, dir, path)) |m| {
+            return .{ .ok = m };
+        } else |err| switch (err) {
+            error.FileNotFound => return .absent,
+            // Treat any parse / validation failure as "this slot is
+            // unusable". The caller only fails closed when *both* slots
+            // are unusable; one corrupt slot still allows recovery from
+            // the other (WRK-023). Lumping IO / OOM in here is acceptable
+            // because the alternative — propagating those errors — would
+            // surface a fail-closed even when the other slot is healthy,
+            // which is exactly the silent-data-loss regression A/B
+            // rotation exists to prevent.
+            else => return .corrupt,
+        }
     }
 
     fn replayWal(self: *Engine) !void {

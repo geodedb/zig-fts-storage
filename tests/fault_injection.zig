@@ -79,6 +79,46 @@ test "fault: corrupted segment file rejected on open" {
     }
 }
 
+test "fault: one corrupt manifest, engine selects the valid one" {
+    // WRK-023 (GAP-0028): when only one of manifest.{a,b} is corrupt,
+    // recovery must fall back to the valid copy rather than fail closed.
+    // The "both corrupt" failure-mode is asserted by the unit test in
+    // src/engine.zig; this complements it by exercising selective tampering.
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // Bootstrap with two flushes so both manifest.a and manifest.b are on
+    // disk (the A/B rotation alternates by counter parity).
+    {
+        var eng = try fts.Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        const t = fts.TermPosting{ .term = "x", .positions = &[_]u32{1} };
+        try eng.indexDocument(1, &[_]fts.TermPosting{t});
+        try eng.flush();
+        try eng.indexDocument(2, &[_]fts.TermPosting{t});
+        try eng.flush();
+    }
+
+    // The A/B rotation writes counter=1 to manifest.b (odd parity) and
+    // counter=2 to manifest.a (even parity). Corrupt the older slot
+    // (manifest.b, counter=1) — the engine must still recover the latest
+    // committed state from manifest.a (counter=2, 2 segments).
+    {
+        const f = try tmp_dir.dir.openFile(io, "manifest.b", .{ .mode = .read_write });
+        defer f.close(io);
+        const sz = (try f.stat(io)).size;
+        const buf = [_]u8{0xFF};
+        try f.writePositionalAll(io, &buf, sz - 1);
+    }
+
+    // Reopen — must succeed by selecting manifest.a and load both segments.
+    var eng = try fts.Engine.init(io, alloc, tmp_dir.dir);
+    defer eng.deinit();
+    try std.testing.expectEqual(@as(usize, 2), eng.segments.items.len);
+}
+
 test "fault: both manifests corrupt fails closed" {
     const alloc = std.testing.allocator;
     var tmp_dir = std.testing.tmpDir(.{});
