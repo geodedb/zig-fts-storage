@@ -516,6 +516,17 @@ pub const SegmentReader = struct {
     pub fn search(self: *SegmentReader, term: []const u8) !?PostingIterator {
         if (self.dictionary.get(term)) |entry| {
             if (entry.postings_len > limits.MAX_POSTINGS_BYTES) return error.PostingsTooLarge;
+            // SEC-EXT-0703: per-query bound. The on-disk size cap above
+            // protects against an oversized persisted entry, but a 4-GiB
+            // allocation per term per segment is still ruinous for an
+            // attacker-influenced query (or even an honest one against a
+            // hostile corpus). 256 MiB is enough to hold ~50M postings —
+            // beyond any realistic per-term-per-segment workload — while
+            // keeping the worst-case multi-segment fan-out (N * 256 MiB)
+            // bounded. Multi-segment queries pay this per segment; an
+            // engine-wide bound would require coordination across iterator
+            // construction and is deferred (TermIterator-level cap).
+            if (entry.postings_len > limits.MAX_POSTINGS_BYTES_PER_QUERY) return error.PostingsTooLarge;
             const postings_len_usize = std.math.cast(usize, entry.postings_len) orelse return error.PostingsTooLarge;
             const data = try self.allocator.alloc(u8, postings_len_usize);
             errdefer self.allocator.free(data);

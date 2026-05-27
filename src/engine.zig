@@ -70,6 +70,14 @@ pub const Engine = struct {
     /// SEC-EXT-0402). Null = plaintext segments. Must be 32 bytes when set.
     aead_key: ?[]const u8 = null,
 
+    /// Thread that owns this Engine instance. Captured in `init`; every
+    /// mutating method asserts the caller is on the same thread in debug
+    /// builds (SEC-EXT-0701). The Engine is single-threaded by contract —
+    /// callers are responsible for serializing access. This assertion turns
+    /// silent data races (which Zig's memory model leaves UB-shaped) into
+    /// a loud test-time panic so the contract is auditable.
+    owning_thread: std.Thread.Id = 0,
+
     /// Initialize an Engine on the given directory.
     ///
     /// Ownership: the caller retains ownership of `base_dir`. Engine will open
@@ -86,6 +94,15 @@ pub const Engine = struct {
     /// `segments/seg_*/...`) would be followed. The owner-only `0o700` dir
     /// permissions on `wal/` and `segments/` mitigate the local-user case,
     /// but the parent `base_dir` is the caller's responsibility.
+    ///
+    /// THREAD CONTRACT (SEC-EXT-0701): the Engine is single-threaded by
+    /// design. The owning thread is captured at `init` time and every
+    /// mutating method (`indexDocument`, `deleteDocument`, `flush`,
+    /// `compact`, `deinit`) asserts the caller is on that thread in debug
+    /// builds. Callers that need multi-threaded read access must serialize
+    /// behind their own mutex — search-time data structures
+    /// (`SegmentReader.dictionary`, the engine-wide tombstone set) are
+    /// otherwise not protected against concurrent mutation.
     pub fn init(io: std.Io, allocator: Allocator, base_dir: std.Io.Dir) !*Engine {
         return initWithConfig(io, allocator, base_dir, .{});
     }
@@ -115,6 +132,9 @@ pub const Engine = struct {
         engine.dir = base_dir;
         engine.hmac_key = config.hmac_key;
         engine.aead_key = config.aead_key;
+        // SEC-EXT-0701: capture the calling thread so every mutating method
+        // can debug-assert it has not been smuggled to another thread.
+        engine.owning_thread = std.Thread.getCurrentId();
         engine.memtable = segment.Memtable.init(allocator);
         errdefer engine.memtable.deinit();
         engine.segments = .empty;
@@ -293,7 +313,20 @@ pub const Engine = struct {
         return engine;
     }
 
+    /// SEC-EXT-0701: debug-only assertion that the calling thread matches
+    /// the one captured by `init`. Compiled out of release builds via
+    /// `std.debug.runtime_safety`. A mismatch indicates a violation of the
+    /// single-thread contract — almost certainly a bug — so panicking is
+    /// the right response: the alternative is the silent data race that
+    /// Zig's memory model leaves as undefined behavior.
+    fn assertOwnedByCurrentThread(self: *Engine) void {
+        if (std.debug.runtime_safety) {
+            std.debug.assert(self.owning_thread == std.Thread.getCurrentId());
+        }
+    }
+
     pub fn deinit(self: *Engine) void {
+        self.assertOwnedByCurrentThread();
         self.wal_writer.deinit();
         self.wal_file.close(self.io);
         self.wal_dir.close(self.io);
@@ -546,6 +579,7 @@ pub const Engine = struct {
         terms: []const TermPosting,
         excluded_fields: []const []const u8,
     ) !void {
+        self.assertOwnedByCurrentThread();
         for (terms) |t| {
             if (t.field) |f| {
                 for (excluded_fields) |ef| {
@@ -557,6 +591,7 @@ pub const Engine = struct {
     }
 
     pub fn indexDocument(self: *Engine, doc_id: u64, terms: []const TermPosting) !void {
+        self.assertOwnedByCurrentThread();
         // Validate inputs at the API boundary before any side effects
         // (SEC-EXT-0101, 0102, 0103, 0104, 0105, 0107, 0205, 0208).
         for (terms) |t| {
@@ -654,6 +689,7 @@ pub const Engine = struct {
     }
 
     pub fn deleteDocument(self: *Engine, doc_id: u64) !void {
+        self.assertOwnedByCurrentThread();
         const txn_id = self.next_txn_id;
         self.next_txn_id += 1;
 
@@ -697,6 +733,7 @@ pub const Engine = struct {
     }
 
     pub fn flush(self: *Engine) !void {
+        self.assertOwnedByCurrentThread();
         if (self.memtable.dictionary.count() == 0 and self.memtable.tombstones.count() == 0) return;
 
         const next_segment_id = self.current_manifest.counter + 1;
@@ -853,6 +890,7 @@ pub const Engine = struct {
     ///
     /// No-op if fewer than 2 segments exist.
     pub fn compact(self: *Engine) !void {
+        self.assertOwnedByCurrentThread();
         if (self.segments.items.len <= 1) return;
 
         // Build a fresh in-memory memtable holding every (term, doc_id,

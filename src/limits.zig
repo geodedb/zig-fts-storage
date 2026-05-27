@@ -49,6 +49,14 @@ pub const DEFAULT_DOC_LEN: u32 = 100;
 /// Maximum byte length of a single segment postings buffer.
 pub const MAX_POSTINGS_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
 
+/// Maximum bytes a single `SegmentReader.search` call will allocate for one
+/// term's postings buffer (SEC-EXT-0703). Distinct from `MAX_POSTINGS_BYTES`
+/// which bounds the persisted on-disk length; this is the stricter per-query
+/// bound that limits transient query-time memory pressure regardless of how
+/// large the segment is. Multi-segment queries pay `N * cap`, so this is
+/// the cap per (term, segment), not per query overall.
+pub const MAX_POSTINGS_BYTES_PER_QUERY: u64 = 256 * 1024 * 1024; // 256 MiB
+
 /// Default memtable flush threshold in distinct documents. Exceeding this
 /// triggers an automatic flush in `Engine.indexDocument` / `deleteDocument`
 /// so memtable memory is bounded regardless of caller behavior
