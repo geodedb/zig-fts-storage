@@ -1,0 +1,53 @@
+{
+  "generated_at_unix_s": 1779904604,
+  "rows": [
+    {
+      "git_sha": "86f9cd604a7d3b8c2ed63ac292cc010141f83561",
+      "run_timestamp_unix_s": 1779904604,
+      "zig_version": "0.16.0",
+      "os": "linux",
+      "arch": "x86_64",
+      "cpu": "znver2",
+      "scenario_name": "bm25_score_single",
+      "ops_per_iteration": 1000000,
+      "sample_count": 30,
+      "wall_ns_min": 360954,
+      "wall_ns_p50": 455734,
+      "wall_ns_p95": 932288,
+      "wall_ns_p99": 966202,
+      "wall_ns_max": 1563895,
+      "wall_ns_stddev": 269064.8975541031,
+      "throughput_ops_per_sec": 2194262442.5651803,
+      "throughput_stddev_ops_per_sec": 560455452.0996369,
+      "alloc_count": 0,
+      "alloc_bytes": 0,
+      "peak_live_bytes": 0,
+      "rss_current_bytes": 2027520,
+      "rss_peak_bytes": 2027520
+    },
+    {
+      "git_sha": "86f9cd604a7d3b8c2ed63ac292cc010141f83561",
+      "run_timestamp_unix_s": 1779904604,
+      "zig_version": "0.16.0",
+      "os": "linux",
+      "arch": "x86_64",
+      "cpu": "znver2",
+      "scenario_name": "bm25_score_norm_scan_16seg",
+      "ops_per_iteration": 100000,
+      "sample_count": 30,
+      "wall_ns_min": 4252774,
+      "wall_ns_p50": 5124457,
+      "wall_ns_p95": 5746667,
+      "wall_ns_p99": 5823162,
+      "wall_ns_max": 8690900,
+      "wall_ns_stddev": 779104.6346197238,
+      "throughput_ops_per_sec": 19514262.681880247,
+      "throughput_stddev_ops_per_sec": 2231868.9092876664,
+      "alloc_count": 0,
+      "alloc_bytes": 0,
+      "peak_live_bytes": 0,
+      "rss_current_bytes": 2031616,
+      "rss_peak_bytes": 2031616
+    }
+  ]
+}

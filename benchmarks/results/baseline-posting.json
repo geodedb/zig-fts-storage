@@ -1,0 +1,53 @@
+{
+  "generated_at_unix_s": 1779904622,
+  "rows": [
+    {
+      "git_sha": "86f9cd604a7d3b8c2ed63ac292cc010141f83561",
+      "run_timestamp_unix_s": 1779904622,
+      "zig_version": "0.16.0",
+      "os": "linux",
+      "arch": "x86_64",
+      "cpu": "znver2",
+      "scenario_name": "posting_iter_next_with_positions",
+      "ops_per_iteration": 10000,
+      "sample_count": 30,
+      "wall_ns_min": 200571,
+      "wall_ns_p50": 220067,
+      "wall_ns_p95": 248391,
+      "wall_ns_p99": 256767,
+      "wall_ns_max": 264432,
+      "wall_ns_stddev": 16131.959405684936,
+      "throughput_ops_per_sec": 45440706.6938705,
+      "throughput_stddev_ops_per_sec": 3036997.191657028,
+      "alloc_count": 2,
+      "alloc_bytes": 60176,
+      "peak_live_bytes": 60176,
+      "rss_current_bytes": 4591616,
+      "rss_peak_bytes": 4591616
+    },
+    {
+      "git_sha": "86f9cd604a7d3b8c2ed63ac292cc010141f83561",
+      "run_timestamp_unix_s": 1779904622,
+      "zig_version": "0.16.0",
+      "os": "linux",
+      "arch": "x86_64",
+      "cpu": "znver2",
+      "scenario_name": "posting_iter_next_doc_only",
+      "ops_per_iteration": 10000,
+      "sample_count": 30,
+      "wall_ns_min": 79671,
+      "wall_ns_p50": 90472,
+      "wall_ns_p95": 104108,
+      "wall_ns_p99": 105810,
+      "wall_ns_max": 117012,
+      "wall_ns_stddev": 8114.529748132872,
+      "throughput_ops_per_sec": 110531435.14015387,
+      "throughput_stddev_ops_per_sec": 8995832.501909744,
+      "alloc_count": 1,
+      "alloc_bytes": 60000,
+      "peak_live_bytes": 60000,
+      "rss_current_bytes": 4653056,
+      "rss_peak_bytes": 4653056
+    }
+  ]
+}
