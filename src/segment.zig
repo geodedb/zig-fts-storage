@@ -48,6 +48,16 @@ pub const MemPostingsList = struct {
 
 pub const Memtable = struct {
     allocator: Allocator,
+    /// Arena allocator used for term-key copies. PERF-0003 / Phase B4:
+    /// every `addPosting` first-seen term path previously called
+    /// `allocator.dupe(u8, term)` and the matching `allocator.free` ran on
+    /// every deinit/flush — N* allocations and N matching frees per memtable
+    /// generation. Arena-backing the term keys lets the entire generation
+    /// free in O(1) at flush via `arena.deinit()`. Position lists, postings
+    /// vectors, and hash maps stay on the parent allocator because they
+    /// grow geometrically inside a memtable's lifetime and the arena would
+    /// leak intermediate reallocations until the next flush.
+    arena: std.heap.ArenaAllocator,
     dictionary: std.StringHashMapUnmanaged(MemPostingsList),
     tombstones: std.AutoHashMapUnmanaged(u64, void),
     /// Tracks unique doc_ids ever observed by addPosting, so total_docs counts
@@ -58,6 +68,7 @@ pub const Memtable = struct {
     pub fn init(allocator: Allocator) Memtable {
         return .{
             .allocator = allocator,
+            .arena = std.heap.ArenaAllocator.init(allocator),
             .dictionary = .empty,
             .tombstones = .empty,
             .seen_docs = .empty,
@@ -68,9 +79,6 @@ pub const Memtable = struct {
     pub fn deinit(self: *Memtable) void {
         var it = self.dictionary.iterator();
         while (it.next()) |entry| {
-            // we allocated the key string using the allocator
-            self.allocator.free(entry.key_ptr.*);
-
             for (entry.value_ptr.postings.items) |*posting| {
                 posting.positions.deinit(self.allocator);
             }
@@ -79,6 +87,9 @@ pub const Memtable = struct {
         self.dictionary.deinit(self.allocator);
         self.tombstones.deinit(self.allocator);
         self.seen_docs.deinit(self.allocator);
+        // All term-key copies live in the arena; one deinit frees them all
+        // (PERF-0003 / Phase B4).
+        self.arena.deinit();
     }
 
     pub fn addTombstone(self: *Memtable, doc_id: u64) !void {
@@ -98,16 +109,22 @@ pub const Memtable = struct {
 
         var entry = try self.dictionary.getOrPut(self.allocator, term);
         if (!entry.found_existing) {
-            // Dup the string to own it. Guard against partial init: if any
-            // subsequent step fails the dup'd key would otherwise leak and the
-            // hash map would retain a slot pointing at uninitialized memory.
-            const key_copy = try self.allocator.dupe(u8, term);
-            errdefer self.allocator.free(key_copy);
+            // PERF-0003 / Phase B4: dup the key into the arena instead of
+            // the parent allocator. Failure here would leave the hash map
+            // entry pointing at uninitialized memory; the arena-dup is
+            // infallible from the caller's perspective except on OOM, where
+            // we still remove the half-installed entry to keep map slots
+            // consistent. Arena memory is reclaimed wholesale at flush.
+            const key_copy = self.arena.allocator().dupe(u8, term) catch |err| {
+                _ = self.dictionary.remove(term);
+                return err;
+            };
             entry.key_ptr.* = key_copy;
             entry.value_ptr.* = .{
                 .postings = .empty,
                 .df = 0,
             };
+            // No errdefer free of key_copy — arena ownership.
             errdefer _ = self.dictionary.remove(key_copy);
         }
 
