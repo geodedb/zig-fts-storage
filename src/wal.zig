@@ -42,6 +42,30 @@ pub const WalRecord = struct {
         return buf;
     }
 
+    /// Serialize into a caller-provided buffer instead of allocating a fresh
+    /// one (WRK-032, PERF-0002). Equivalent bytes to `serialize` but reuses
+    /// the buffer's capacity across calls — the WalWriter's per-bracket
+    /// scratch is the primary caller.
+    pub fn serializeInto(self: *const @This(), alloc: Allocator, buf: *std.ArrayListUnmanaged(u8)) !void {
+        const payload_len: u32 = @intCast(self.payload.len);
+        const size = 1 + 8 + 8 + 4 + payload_len + 4;
+        try buf.ensureUnusedCapacity(alloc, size);
+        const start = buf.items.len;
+        buf.appendAssumeCapacity(@intFromEnum(self.record_type));
+        var num_buf: [8]u8 = undefined;
+        std.mem.writeInt(u64, &num_buf, self.txn_id, .little);
+        buf.appendSliceAssumeCapacity(&num_buf);
+        std.mem.writeInt(u64, &num_buf, self.doc_id, .little);
+        buf.appendSliceAssumeCapacity(&num_buf);
+        var len_buf: [4]u8 = undefined;
+        std.mem.writeInt(u32, &len_buf, payload_len, .little);
+        buf.appendSliceAssumeCapacity(&len_buf);
+        buf.appendSliceAssumeCapacity(self.payload);
+        const crc = utils.hashCrc32c(buf.items[start..]);
+        std.mem.writeInt(u32, &len_buf, crc, .little);
+        buf.appendSliceAssumeCapacity(&len_buf);
+    }
+
     pub fn deserialize(alloc: Allocator, data: []const u8) !struct { rec: WalRecord, bytes_read: usize } {
         if (data.len < 1 + 8 + 8 + 4 + 4) return error.Incomplete;
 
@@ -84,6 +108,12 @@ pub const WalWriter = struct {
     allocator: Allocator,
     io: std.Io,
     offset: u64,
+    /// Per-writer scratch buffer reused across append() calls so each WAL
+    /// record does not allocate a fresh heap buffer for serialization
+    /// (WRK-032, PERF-0002). Group-commit batching (one fsync over N
+    /// records) is a follow-up — this change only removes the per-record
+    /// alloc/free churn without touching durability semantics.
+    scratch: std.ArrayListUnmanaged(u8) = .empty,
 
     pub fn init(io: std.Io, file: std.Io.File, allocator: Allocator) !WalWriter {
         const stat = try file.stat(io);
@@ -95,11 +125,15 @@ pub const WalWriter = struct {
         };
     }
 
+    pub fn deinit(self: *WalWriter) void {
+        self.scratch.deinit(self.allocator);
+    }
+
     pub fn append(self: *WalWriter, record: WalRecord) !void {
-        const data = try record.serialize(self.allocator);
-        defer self.allocator.free(data);
-        try self.file.writePositionalAll(self.io, data, self.offset);
-        self.offset += data.len;
+        self.scratch.clearRetainingCapacity();
+        try record.serializeInto(self.allocator, &self.scratch);
+        try self.file.writePositionalAll(self.io, self.scratch.items, self.offset);
+        self.offset += self.scratch.items.len;
     }
 
     pub fn sync(self: *WalWriter) !void {
@@ -230,6 +264,7 @@ test "WalReader reads records sequentially" {
         const file = try tmp_dir.dir.createFile(io, file_path, .{});
         defer file.close(io);
         var writer = try WalWriter.init(io, file, alloc);
+        defer writer.deinit();
 
         const r1 = WalRecord{ .record_type = .begin, .txn_id = 1 };
         try writer.append(r1);

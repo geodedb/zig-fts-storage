@@ -164,6 +164,7 @@ pub const Engine = struct {
     }
 
     pub fn deinit(self: *Engine) void {
+        self.wal_writer.deinit();
         self.wal_file.close(self.io);
         self.wal_dir.close(self.io);
 
@@ -550,6 +551,7 @@ pub const Engine = struct {
         //
         // Truncate WAL. The records it contained are now redundant with the
         // segment + manifest pair.
+        self.wal_writer.deinit();
         self.wal_file.close(self.io);
         self.wal_file = try self.wal_dir.createFile(self.io, "fts.wal", .{
             .truncate = true,
