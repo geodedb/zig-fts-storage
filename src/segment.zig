@@ -306,6 +306,15 @@ pub const SegmentReader = struct {
     allocator: Allocator,
     segment_id: u64,
     dictionary: std.StringHashMapUnmanaged(DictEntry),
+    /// PERF-0017: per-segment term-key arena. The dictionary hash map's keys
+    /// are slices into this single contiguous allocation rather than N
+    /// independently-allocated `allocator.dupe(u8, term)` strings. For a
+    /// segment with 100k terms × ~8-byte avg term, this drops the heap
+    /// footprint from ~100k × (term_len + allocator-header overhead) to
+    /// ~100k × term_len + one header — roughly a 2-3× reduction. Freed once
+    /// in deinit instead of per-entry. Empty (`.len == 0`) when the segment
+    /// has no terms.
+    key_arena: []u8,
     tombstones: std.AutoHashMapUnmanaged(u64, void),
     /// Per-doc length norms loaded from norms.bin. Used by BM25 scoring in
     /// search.zig to compute length normalization (WRK-035, GAP-0005,
@@ -363,6 +372,7 @@ pub const SegmentReader = struct {
             .allocator = allocator,
             .segment_id = segment_id,
             .dictionary = .empty,
+            .key_arena = &.{},
             .tombstones = .empty,
             .norms = .empty,
             .seg_dir = seg_dir,
@@ -372,13 +382,12 @@ pub const SegmentReader = struct {
         };
         // If load() fails partway (corrupted terms.hash, truncated payload),
         // any dictionary entries / capacity already allocated must be torn
-        // down or the caller leaks (WRK-022).
+        // down or the caller leaks (WRK-022). PERF-0017: keys live in the
+        // single `key_arena` allocation, so the per-entry free loop is gone —
+        // just freeing the arena (when non-empty) suffices.
         errdefer {
-            var it = seg.dictionary.iterator();
-            while (it.next()) |entry| {
-                allocator.free(entry.key_ptr.*);
-            }
             seg.dictionary.deinit(allocator);
+            if (seg.key_arena.len != 0) allocator.free(seg.key_arena);
             seg.tombstones.deinit(allocator);
             seg.norms.deinit(allocator);
             if (seg.postings_data) |pd| allocator.free(pd);
@@ -390,11 +399,10 @@ pub const SegmentReader = struct {
     pub fn deinit(self: *SegmentReader) void {
         self.postings_file.close(self.io);
         self.seg_dir.close(self.io);
-        var it = self.dictionary.iterator();
-        while (it.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-        }
+        // PERF-0017: dictionary keys are slices into `key_arena`; a single
+        // free replaces the prior per-entry free loop.
         self.dictionary.deinit(self.allocator);
+        if (self.key_arena.len != 0) self.allocator.free(self.key_arena);
         self.tombstones.deinit(self.allocator);
         self.norms.deinit(self.allocator);
         if (self.postings_data) |pd| self.allocator.free(pd);
@@ -575,23 +583,58 @@ pub const SegmentReader = struct {
         // parser since `readSegmentFile` returns the same bytes that used
         // to be streamed.
 
-        // Load dictionary.
+        // Load dictionary. PERF-0017: keys are interned into a single
+        // per-segment arena instead of N individual `dupe` allocations.
+        // Two-pass over dict_buf — first to compute total term bytes so the
+        // arena can be sized exactly, second to copy + register entries.
         if (try self.readSegmentFile("terms.hash")) |dict_buf| {
             defer self.allocator.free(dict_buf);
             var pos: usize = 0;
             if (dict_buf.len < 4) return error.Incomplete;
             const count = utils.readU32Le(dict_buf, &pos);
             if (count > limits.MAX_TERMS_PER_SEGMENT) return error.TermCountTooLarge;
+            const header_end = pos;
+
+            // Pass 1: compute total bytes of term names. Walk the same record
+            // layout the writer emits: u16 term_len | term | 24 bytes of
+            // (df,offset,len). Bounds-check every step exactly like Pass 2.
+            var total_term_bytes: usize = 0;
+            {
+                var p: usize = header_end;
+                var i: usize = 0;
+                while (i < count) : (i += 1) {
+                    if (p + 2 > dict_buf.len) return error.Incomplete;
+                    const tl = utils.readU16Le(dict_buf, &p);
+                    if (p + tl > dict_buf.len) return error.Incomplete;
+                    total_term_bytes += tl;
+                    p += tl;
+                    if (p + 24 > dict_buf.len) return error.Incomplete;
+                    p += 24;
+                }
+            }
+
+            // Allocate the arena exactly once. Empty segments (count==0)
+            // intentionally leave `key_arena.len == 0` so deinit skips the
+            // free path.
+            if (total_term_bytes != 0) {
+                self.key_arena = try self.allocator.alloc(u8, total_term_bytes);
+            }
+
             try self.dictionary.ensureTotalCapacity(self.allocator, count);
 
+            // Pass 2: populate. `arena_off` tracks the write head into
+            // key_arena; each entry's key is a stable slice into it (the
+            // arena is allocated once, never resized, so slices never move).
+            var arena_off: usize = 0;
             var i: usize = 0;
             while (i < count) : (i += 1) {
                 if (pos + 2 > dict_buf.len) return error.Incomplete;
                 const term_len = utils.readU16Le(dict_buf, &pos);
                 if (pos + term_len > dict_buf.len) return error.Incomplete;
-                const term = try self.allocator.alloc(u8, term_len);
-                errdefer self.allocator.free(term);
-                @memcpy(term, dict_buf[pos .. pos + term_len]);
+
+                const key_slice = self.key_arena[arena_off .. arena_off + term_len];
+                @memcpy(key_slice, dict_buf[pos .. pos + term_len]);
+                arena_off += term_len;
                 pos += term_len;
 
                 if (pos + 24 > dict_buf.len) return error.Incomplete;
@@ -599,7 +642,7 @@ pub const SegmentReader = struct {
                 const offset = utils.readU64Le(dict_buf, &pos);
                 const len = utils.readU64Le(dict_buf, &pos);
 
-                self.dictionary.putAssumeCapacityNoClobber(term, .{
+                self.dictionary.putAssumeCapacityNoClobber(key_slice, .{
                     .df = df,
                     .postings_offset = offset,
                     .postings_len = len,

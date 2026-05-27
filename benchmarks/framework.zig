@@ -235,6 +235,13 @@ pub fn runScenarios(
         while (iter < warmup + samples) : (iter += 1) {
             const is_warmup = iter < warmup;
 
+            // PERF-0023: when `--no-track` is passed (`track_allocations =
+            // false`), `tracker` is null and the timed body runs against the
+            // raw `allocator` — no wrapper vtable, no per-call counter math.
+            // This keeps the tightest hot loops free of bench instrumentation
+            // overhead and is the documented escape hatch when a scenario's
+            // measured time is dominated by the tracking call sites
+            // themselves.
             var tracker: ?TrackingAllocator = if (options.track_allocations)
                 TrackingAllocator.init(allocator)
             else
