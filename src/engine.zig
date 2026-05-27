@@ -524,17 +524,43 @@ pub const Engine = struct {
         };
 
         // Plumb running totals up to the manifest (QUAL-0006, DC-2, DC-3,
-        // GAP-0007). avg_doc_len is intentionally left at zero here; the
-        // length-weighted aggregation is deferred to WRK-035 (BM25 length
-        // normalization) which needs per-doc length tracking the memtable
-        // does not yet capture.
+        // GAP-0007). avg_doc_len is updated here using a length-weighted
+        // rolling average across segments so BM25 length normalization has
+        // a stable corpus statistic (WRK-035, GAP-0005, GAP-0006).
+        //
+        // Snapshot pre-update avg/total so the errdefer below can restore.
+        const old_avg_doc_len = self.current_manifest.avg_doc_len;
+
+        // Compute total token length of the memtable about to be sealed:
+        // sum of tf across every (term, posting). This matches what
+        // SegmentWriter.writeNorms persists per-doc.
+        const total_doc_len_seg: u64 = blk: {
+            var sum: u64 = 0;
+            var it = self.memtable.dictionary.iterator();
+            while (it.next()) |entry| {
+                for (entry.value_ptr.postings.items) |p| sum += p.tf;
+            }
+            break :blk sum;
+        };
+
         self.current_manifest.total_docs += self.memtable.total_docs;
         self.current_manifest.counter += 1;
         self.current_manifest.last_checkpoint_lsn = self.next_txn_id - 1;
+
+        // Rolling, length-weighted average: prev_total_len = old_avg * old_doc_count,
+        // new_avg = (prev_total_len + this_seg_total_len) / new_doc_count.
+        // Guard against div-by-zero when total_docs ends up zero (shouldn't
+        // happen post-update, but cheap to be defensive).
+        if (self.current_manifest.total_docs > 0) {
+            const prev_total_len: u64 = @as(u64, old_avg_doc_len) * old_total_docs;
+            const new_avg: u64 = @divTrunc(prev_total_len + total_doc_len_seg, self.current_manifest.total_docs);
+            self.current_manifest.avg_doc_len = std.math.cast(u32, new_avg) orelse std.math.maxInt(u32);
+        }
         errdefer if (!phase2_done) {
             self.current_manifest.total_docs = old_total_docs;
             self.current_manifest.counter = old_counter;
             self.current_manifest.last_checkpoint_lsn = old_last_checkpoint_lsn;
+            self.current_manifest.avg_doc_len = old_avg_doc_len;
         };
 
         // PHASE 2: durably write the manifest. After this returns successfully

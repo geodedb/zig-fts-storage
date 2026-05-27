@@ -129,6 +129,55 @@ pub const SegmentWriter = struct {
 
         try self.writeDictionaryAndPostings(&seg_dir, memtable);
         try self.writeTombstones(&seg_dir, memtable);
+        try self.writeNorms(&seg_dir, memtable);
+    }
+
+    /// Per-doc length normalization data (norms.bin) for BM25 scoring
+    /// (WRK-035, GAP-0005, GAP-0006). Layout:
+    ///   [count: u32 LE][doc_id: u64 LE, length: u32 LE]*count
+    /// where `length` is the sum of `MemPosting.tf` across every term for the
+    /// document — i.e. the document's total token count. Empty memtables
+    /// write no file; reader treats absence as "no norms available".
+    fn writeNorms(self: *SegmentWriter, seg_dir: *std.Io.Dir, memtable: *Memtable) !void {
+        if (memtable.seen_docs.count() == 0) return;
+
+        // Accumulate per-doc total length. Iterate every (term, posting) and
+        // sum tf into a doc_id -> length map. Capacity is bounded by
+        // seen_docs.count() since postings only ever reference observed docs.
+        var doc_lens: std.AutoHashMapUnmanaged(u64, u32) = .empty;
+        defer doc_lens.deinit(self.allocator);
+        try doc_lens.ensureTotalCapacity(self.allocator, memtable.seen_docs.count());
+
+        var dict_it = memtable.dictionary.iterator();
+        while (dict_it.next()) |entry| {
+            for (entry.value_ptr.postings.items) |posting| {
+                const gop = try doc_lens.getOrPut(self.allocator, posting.doc_id);
+                if (!gop.found_existing) gop.value_ptr.* = 0;
+                gop.value_ptr.* = std.math.add(u32, gop.value_ptr.*, posting.tf) catch
+                    return error.PositionCountTooLarge;
+            }
+        }
+
+        // Build entire payload in memory, single writeStreamingAll
+        // (PERF-0004 spirit applied to norms).
+        var norms_buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer norms_buf.deinit(self.allocator);
+
+        var num_buf: [8]u8 = undefined;
+        std.mem.writeInt(u32, num_buf[0..4], @intCast(doc_lens.count()), .little);
+        try norms_buf.appendSlice(self.allocator, num_buf[0..4]);
+
+        var it = doc_lens.iterator();
+        while (it.next()) |entry| {
+            std.mem.writeInt(u64, num_buf[0..8], entry.key_ptr.*, .little);
+            try norms_buf.appendSlice(self.allocator, num_buf[0..8]);
+            std.mem.writeInt(u32, num_buf[0..4], entry.value_ptr.*, .little);
+            try norms_buf.appendSlice(self.allocator, num_buf[0..4]);
+        }
+
+        const norms_file = try seg_dir.createFile(self.io, "norms.bin", .{ .permissions = utils.fileMode(0o600) });
+        defer norms_file.close(self.io);
+        try norms_file.writeStreamingAll(self.io, norms_buf.items);
     }
 
     fn writeDictionaryAndPostings(self: *SegmentWriter, seg_dir: *std.Io.Dir, memtable: *Memtable) !void {
@@ -238,6 +287,11 @@ pub const SegmentReader = struct {
     segment_id: u64,
     dictionary: std.StringHashMapUnmanaged(DictEntry),
     tombstones: std.AutoHashMapUnmanaged(u64, void),
+    /// Per-doc length norms loaded from norms.bin. Used by BM25 scoring in
+    /// search.zig to compute length normalization (WRK-035, GAP-0005,
+    /// GAP-0006). Missing file -> empty map -> callers fall back to
+    /// `limits.DEFAULT_DOC_LEN`.
+    norms: std.AutoHashMapUnmanaged(u64, u32),
     /// Cached open handles so search() does not pay an openDir + openFile +
     /// close per query (PERF-0005, PERF-0007, WRK-033). Opened in init,
     /// released in deinit.
@@ -271,6 +325,7 @@ pub const SegmentReader = struct {
             .segment_id = segment_id,
             .dictionary = .empty,
             .tombstones = .empty,
+            .norms = .empty,
             .seg_dir = seg_dir,
             .postings_file = postings_file,
         };
@@ -284,6 +339,7 @@ pub const SegmentReader = struct {
             }
             seg.dictionary.deinit(allocator);
             seg.tombstones.deinit(allocator);
+            seg.norms.deinit(allocator);
         }
         try seg.load();
         return seg;
@@ -298,6 +354,7 @@ pub const SegmentReader = struct {
         }
         self.dictionary.deinit(self.allocator);
         self.tombstones.deinit(self.allocator);
+        self.norms.deinit(self.allocator);
     }
 
     pub const PostingIterator = struct {
@@ -451,6 +508,25 @@ pub const SegmentReader = struct {
             while (i < count) : (i += 1) {
                 const doc_id = try readU64FromFile(file, self.io);
                 self.tombstones.putAssumeCapacityNoClobber(doc_id, {});
+            }
+        } else |err| {
+            if (err != error.FileNotFound) return err;
+        }
+
+        // Load per-doc length norms — refuse to follow symlinks
+        // (SEC-EXT-0301). Absence is fine: segments written before WRK-035
+        // simply have no norms.bin, and BM25 falls back to DEFAULT_DOC_LEN.
+        if (self.seg_dir.openFile(self.io, "norms.bin", .{ .follow_symlinks = false })) |file| {
+            defer file.close(self.io);
+            const count = readU32FromFile(file, self.io) catch 0;
+            if (count > limits.MAX_NORMS_PER_SEGMENT) return error.NormCountTooLarge;
+            try self.norms.ensureTotalCapacity(self.allocator, count);
+
+            var i: usize = 0;
+            while (i < count) : (i += 1) {
+                const doc_id = try readU64FromFile(file, self.io);
+                const length = try readU32FromFile(file, self.io);
+                self.norms.putAssumeCapacityNoClobber(doc_id, length);
             }
         } else |err| {
             if (err != error.FileNotFound) return err;

@@ -25,6 +25,18 @@ pub const MAX_TERMS_PER_SEGMENT: u32 = 1 << 24; // 16,777,216
 /// Maximum tombstone entries loaded from a single segment.
 pub const MAX_TOMBSTONES_PER_SEGMENT: u32 = 1 << 24;
 
+/// Maximum norm entries (per-doc length records) loaded from a single segment.
+/// Bounded the same as terms-per-segment since norms.bin holds one entry per
+/// distinct doc_id in the segment (WRK-035, GAP-0005, GAP-0006).
+pub const MAX_NORMS_PER_SEGMENT: u32 = 1 << 24;
+
+/// Fallback document length used in BM25 length normalization when the
+/// manifest's `avg_doc_len` is still zero (e.g. very first flush) or when
+/// a per-doc norm is unavailable. A round-number stand-in keeps the BM25
+/// formula stable; correctness of relative ranking is preserved because the
+/// same fallback applies uniformly across the missing-data set (WRK-035).
+pub const DEFAULT_DOC_LEN: u32 = 100;
+
 /// Maximum byte length of a single segment postings buffer.
 pub const MAX_POSTINGS_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
 

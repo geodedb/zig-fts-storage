@@ -28,6 +28,7 @@ pub const SegmentError = error{
     ChecksumMismatch,
     TermCountTooLarge,
     TombstoneCountTooLarge,
+    NormCountTooLarge,
     PostingsTooLarge,
     PositionCountTooLarge,
     PositionOutOfRange,
