@@ -209,13 +209,28 @@ pub const Engine = struct {
         defer file.close(self.io);
 
         var reader = wal.WalReader.init(self.io, file, self.allocator);
-        // A crash mid-WAL-write is normal: recovery must truncate at the last
-        // good record rather than abort. Treat Incomplete / EndOfStream /
-        // ChecksumMismatch as the signal that the durable tail has ended
-        // (PERF-0014, PERF-0019, SEC-EXT-0211, SEC-EXT-0212). InvalidData
-        // (unknown record type) is skipped for forward-compat — a future
-        // version that emits a new record type must not brick rollback to an
-        // older binary.
+
+        // WRK-025 (GAP-0012, GAP-0013): WAL replay groups records by txn_id
+        // and applies payload records (index_doc / delete_doc) only if their
+        // matching COMMIT was observed. A crash mid-indexDocument leaves the
+        // BEGIN+payload on disk without a COMMIT — those records must be
+        // dropped on recovery so the memtable never reflects partial state.
+        //
+        // First pass: drain the file into a flat list, tolerating a torn tail
+        // exactly like the pre-bracketing replay did (PERF-0014, PERF-0019,
+        // SEC-EXT-0211, SEC-EXT-0212). InvalidData (unknown record type) is
+        // skipped for forward-compat so a newer record type doesn't brick
+        // rollback to an older binary.
+        //
+        // Memory note: this currently buffers every record. For v0.1 the
+        // per-record cap (10 MiB) × bounded WAL length is acceptable;
+        // streaming two-pass replay is deferred (WRK-025 follow-up).
+        var all: std.ArrayListUnmanaged(wal.WalRecord) = .empty;
+        defer {
+            for (all.items) |*r| r.deinit(self.allocator);
+            all.deinit(self.allocator);
+        }
+
         while (true) {
             const rec_opt = reader.next() catch |err| switch (err) {
                 error.Incomplete,
@@ -226,23 +241,28 @@ pub const Engine = struct {
                 else => return err,
             };
             const rec = rec_opt orelse break;
-            var r = rec;
-            defer r.deinit(self.allocator);
+            try all.append(self.allocator, rec);
+        }
 
-            // Only process records if their txn_id > last_checkpoint_lsn
-            if (r.txn_id <= self.current_manifest.last_checkpoint_lsn) continue;
-
-            if (r.txn_id >= self.next_txn_id) {
-                self.next_txn_id = r.txn_id + 1;
+        // Second pass: build the set of committed txn_ids.
+        var committed: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        defer committed.deinit(self.allocator);
+        for (all.items) |r| {
+            if (r.record_type == .commit) {
+                try committed.put(self.allocator, r.txn_id, {});
             }
+        }
 
+        // Third pass: apply payload records whose txn was committed and
+        // sits past the checkpoint. begin/commit themselves contribute no
+        // payload to apply.
+        for (all.items) |r| {
+            if (r.txn_id <= self.current_manifest.last_checkpoint_lsn) continue;
+            if (!committed.contains(r.txn_id)) continue;
+            if (r.txn_id >= self.next_txn_id) self.next_txn_id = r.txn_id + 1;
             switch (r.record_type) {
-                .index_doc => {
-                    try self.applyIndexDocPayload(r.doc_id, r.payload);
-                },
-                .delete_doc => {
-                    try self.memtable.addTombstone(r.doc_id);
-                },
+                .index_doc => try self.applyIndexDocPayload(r.doc_id, r.payload),
+                .delete_doc => try self.memtable.addTombstone(r.doc_id),
                 else => {},
             }
         }
@@ -332,7 +352,27 @@ pub const Engine = struct {
         // WAL first — durable before in-memory mutation. If WAL append/sync
         // fails the memtable stays untouched and the next flush cannot diverge
         // from the durable log (QUAL-0007).
+        //
+        // WRK-025 (GAP-0012, GAP-0013): bracket the payload with BEGIN and
+        // COMMIT records sharing the same txn_id. Replay applies the payload
+        // only if it observes the matching COMMIT, so a crash between BEGIN
+        // and COMMIT leaves no partial state on recovery. fsync once at the
+        // end of the bracket — that is the durability boundary.
+        const begin_rec = wal.WalRecord{
+            .record_type = .begin,
+            .txn_id = txn_id,
+            .doc_id = 0,
+            .payload = "",
+        };
+        try self.wal_writer.append(begin_rec);
         try self.wal_writer.append(rec);
+        const commit_rec = wal.WalRecord{
+            .record_type = .commit,
+            .txn_id = txn_id,
+            .doc_id = 0,
+            .payload = "",
+        };
+        try self.wal_writer.append(commit_rec);
         try self.wal_writer.sync();
 
         // Only mutate memtable after WAL is durable. Bump next_txn_id last so
@@ -366,7 +406,23 @@ pub const Engine = struct {
             .doc_id = doc_id,
         };
 
+        // WRK-025 (GAP-0012, GAP-0013): bracket the delete with BEGIN/COMMIT
+        // so a torn write between BEGIN and COMMIT is rolled back on replay.
+        const begin_rec = wal.WalRecord{
+            .record_type = .begin,
+            .txn_id = txn_id,
+            .doc_id = 0,
+            .payload = "",
+        };
+        try self.wal_writer.append(begin_rec);
         try self.wal_writer.append(rec);
+        const commit_rec = wal.WalRecord{
+            .record_type = .commit,
+            .txn_id = txn_id,
+            .doc_id = 0,
+            .payload = "",
+        };
+        try self.wal_writer.append(commit_rec);
         try self.wal_writer.sync();
 
         // Symmetrical auto-flush check (SEC-EXT-0702). Deletes alone won't
@@ -614,4 +670,78 @@ test "Engine.init fails closed when both manifests corrupt" {
     // here would drop every previously flushed segment from view, masking
     // tampering or storage corruption (SEC-EXT-0304, GAP-0028).
     try std.testing.expectError(error.ManifestCorrupt, Engine.init(io, alloc, tmp_dir.dir));
+}
+
+test "WAL replay drops uncommitted (no COMMIT) records" {
+    // WRK-025 (GAP-0012, GAP-0013): a BEGIN + payload pair on disk without
+    // its matching COMMIT must not be applied on replay. Simulate a crash
+    // between BEGIN and COMMIT by manually appending a BEGIN + INDEX_DOC
+    // pair for a "ghost" doc, with no COMMIT to seal them.
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // Bootstrap with one real, committed indexDocument.
+    {
+        var eng = try Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        const t = TermPosting{ .term = "real", .positions = &[_]u32{1} };
+        try eng.indexDocument(1, &[_]TermPosting{t});
+    }
+
+    // Manually append BEGIN(txn=999) + INDEX_DOC(txn=999, doc=42, term="ghost")
+    // with NO COMMIT to the WAL.
+    {
+        var wal_dir = try tmp_dir.dir.openDir(io, "wal", .{});
+        defer wal_dir.close(io);
+        const f = try wal_dir.openFile(io, "fts.wal", .{ .mode = .read_write });
+        defer f.close(io);
+        const sz = (try f.stat(io)).size;
+
+        const begin = wal.WalRecord{
+            .record_type = .begin,
+            .txn_id = 999,
+            .doc_id = 0,
+            .payload = "",
+        };
+
+        // Build the index_doc payload by hand: term_len(u16=5) | "ghost" |
+        // num_pos(u16=1) | varint(1).
+        var pbuf: std.ArrayListUnmanaged(u8) = .empty;
+        defer pbuf.deinit(alloc);
+        var len_buf: [2]u8 = undefined;
+        std.mem.writeInt(u16, &len_buf, 5, .little);
+        try pbuf.appendSlice(alloc, &len_buf);
+        try pbuf.appendSlice(alloc, "ghost");
+        std.mem.writeInt(u16, &len_buf, 1, .little);
+        try pbuf.appendSlice(alloc, &len_buf);
+        var vbuf: [10]u8 = undefined;
+        const written = try utils.writeVarInt(&vbuf, 1);
+        try pbuf.appendSlice(alloc, vbuf[0..written]);
+
+        const idx = wal.WalRecord{
+            .record_type = .index_doc,
+            .txn_id = 999,
+            .doc_id = 42,
+            .payload = pbuf.items,
+        };
+
+        const begin_bytes = try begin.serialize(alloc);
+        defer alloc.free(begin_bytes);
+        const idx_bytes = try idx.serialize(alloc);
+        defer alloc.free(idx_bytes);
+
+        try f.writePositionalAll(io, begin_bytes, sz);
+        try f.writePositionalAll(io, idx_bytes, sz + begin_bytes.len);
+    }
+
+    // Reopen — "real" must be present (its txn was committed); "ghost" must
+    // be absent (its txn never committed, so it was dropped on replay).
+    {
+        var eng = try Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        try std.testing.expect(eng.memtable.dictionary.contains("real"));
+        try std.testing.expect(!eng.memtable.dictionary.contains("ghost"));
+    }
 }
