@@ -1,6 +1,6 @@
 .{
     .name = .fts_storage,
-    .version = "0.1.0",
+    .version = "0.1.1",
     .fingerprint = 0xa07a12457734a375,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},

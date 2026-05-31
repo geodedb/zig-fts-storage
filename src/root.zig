@@ -44,7 +44,7 @@
 const std = @import("std");
 
 /// Library version. Keep in sync with build.zig.zon.
-pub const version: []const u8 = "0.1.0";
+pub const version: []const u8 = "0.1.1";
 
 pub const wal = @import("wal.zig");
 pub const manifest = @import("manifest.zig");
@@ -61,6 +61,12 @@ pub const errors = @import("errors.zig");
 
 /// The append-only inverted-index storage engine.
 pub const Engine = engine.Engine;
+
+/// Opt-in configuration for `Engine.initWithConfig` (HMAC-SHA256 envelopes,
+/// AES-256-GCM segment-at-rest encryption, and the single-writer
+/// thread-identity check). Re-exported so embedders can construct it without
+/// reaching into the `engine` namespace.
+pub const EngineConfig = engine.EngineConfig;
 
 /// A single (term, positions) pair handed to `Engine.indexDocument`.
 pub const TermPosting = engine.TermPosting;

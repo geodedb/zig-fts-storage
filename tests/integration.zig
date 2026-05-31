@@ -140,3 +140,82 @@ test "flush populates manifest total_docs and segment doc_count" {
     try std.testing.expectEqual(@as(u64, 3), eng.current_manifest.total_docs);
     try std.testing.expectEqual(@as(u64, 3), eng.current_manifest.segments.items[0].doc_count);
 }
+
+// SEC-EXT-0701: the default EngineConfig must keep the strict single-writer
+// thread-identity assertion ON. We cannot assert that a debug-assert *fires*
+// without aborting the test process, so instead we pin the contract that the
+// default-constructed config has the flag set to true. Any change that
+// silently flipped the default to permissive would fail here.
+test "default EngineConfig keeps single-writer thread check enabled" {
+    const cfg: fts.EngineConfig = .{};
+    try std.testing.expect(cfg.single_writer_thread_check == true);
+}
+
+// Hand-off for running Engine.init on a DIFFERENT thread than the one that
+// drives index/flush/delete/deinit. The spawned thread only calls
+// initWithConfig and records the result; the allocator, io, and tmp dir are
+// owned by the main thread and outlive the engine (whose teardown also runs
+// on the main thread).
+const CrossThreadInit = struct {
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    base_dir: std.Io.Dir,
+    engine: ?*fts.Engine = null,
+    err: ?anyerror = null,
+
+    fn run(self: *CrossThreadInit) void {
+        // single_writer_thread_check = false: init captures THIS (spawned)
+        // thread as owning_thread, but the assert is gated off so later calls
+        // from the main thread do not trip SEC-EXT-0701.
+        self.engine = fts.Engine.initWithConfig(
+            self.io,
+            self.alloc,
+            self.base_dir,
+            .{ .single_writer_thread_check = false },
+        ) catch |e| {
+            self.err = e;
+            return;
+        };
+    }
+};
+
+// With single_writer_thread_check = false, the engine may be created on one
+// thread and driven from another. This mirrors geode's embedding: a worker
+// thread runs CREATE INDEX (Engine.init) while a different worker later runs
+// writes, a delete, and teardown. Correctness across threads is still
+// guaranteed by the engine's rw_lock (writers exclusive) and, for deinit, the
+// quiescence contract -- the flag only removes the thread-identity debug
+// assert, not any lock.
+test "cross-thread embedding with single_writer_thread_check=false" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // --- init() runs on a spawned thread (the "owning" thread) ---
+    var ctx: CrossThreadInit = .{ .io = io, .alloc = alloc, .base_dir = tmp_dir.dir };
+    const init_thread = try std.Thread.spawn(.{}, CrossThreadInit.run, .{&ctx});
+    init_thread.join();
+    if (ctx.err) |e| return e;
+    const eng = ctx.engine orelse return error.InitProducedNoEngine;
+    // deinit also runs on the MAIN thread (!= the init/owning thread). Under
+    // the default strict config this would trip assertOwnedByCurrentThread.
+    defer eng.deinit();
+
+    // --- everything below runs on the MAIN thread (different from init) ---
+    const hello = fts.TermPosting{ .term = "hello", .positions = &[_]u32{0} };
+    try eng.indexDocument(1, &[_]fts.TermPosting{hello});
+    try eng.indexDocument(2, &[_]fts.TermPosting{hello});
+    // The write landed in the memtable from a non-owning thread without panic.
+    try std.testing.expect(eng.memtable.dictionary.contains("hello"));
+
+    // flush() takes rw_lock exclusive before mutating; runs on the main thread.
+    try eng.flush();
+    try std.testing.expectEqual(@as(usize, 1), eng.segments.items.len);
+    try std.testing.expectEqual(@as(u64, 2), eng.current_manifest.total_docs);
+
+    // delete() also takes the writer lock; doc 1 must become a tombstone.
+    try eng.deleteDocument(1);
+    try std.testing.expect(eng.all_tombstones.contains(1));
+    try std.testing.expect(!eng.all_tombstones.contains(2));
+}

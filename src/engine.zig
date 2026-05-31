@@ -59,6 +59,17 @@ pub const EngineConfig = struct {
     /// nonce stored at the head, then ciphertext, then the 16-byte tag at
     /// the tail (GAP-0009, SEC-EXT-0402). Caller retains key ownership.
     aead_key: ?[]const u8 = null,
+
+    /// When true (default), every mutating/teardown entry point asserts it
+    /// runs on the same thread that called `init`/`initWithConfig` (strict
+    /// single-writer thread-identity invariant, SEC-EXT-0701). Set false for
+    /// embedders that serialize engine access externally (their own mutex)
+    /// AND rely on the engine's `rw_lock`, so the engine may legitimately be
+    /// driven from a worker-thread pool. Disabling this ONLY removes the
+    /// thread-identity debug assert; it does NOT disable any lock -
+    /// concurrency safety still comes from `rw_lock` (writers exclusive,
+    /// readers shared) and, for `deinit`, the quiescence contract.
+    single_writer_thread_check: bool = true,
 };
 
 pub const Engine = struct {
@@ -149,6 +160,13 @@ pub const Engine = struct {
     /// a loud test-time panic so the contract is auditable.
     owning_thread: std.Thread.Id = 0,
 
+    /// Mirrors `EngineConfig.single_writer_thread_check`. When false,
+    /// `assertOwnedByCurrentThread` is a no-op so the engine may be driven
+    /// from a worker-thread pool by an embedder that serializes access with
+    /// its own lock (and relies on `rw_lock` for concurrency). Defaults to
+    /// true = strict thread-identity assertion (SEC-EXT-0701).
+    owning_thread_check: bool = true,
+
     /// Initialize an Engine on the given directory.
     ///
     /// Ownership: the caller retains ownership of `base_dir`. Engine will open
@@ -206,6 +224,10 @@ pub const Engine = struct {
         // SEC-EXT-0701: capture the calling thread so every mutating method
         // can debug-assert it has not been smuggled to another thread.
         engine.owning_thread = std.Thread.getCurrentId();
+        // Embedders that serialize access externally (own mutex + rw_lock) may
+        // opt out of the thread-identity assert so they can drive the engine
+        // from a worker-thread pool. Default true preserves strict behavior.
+        engine.owning_thread_check = config.single_writer_thread_check;
         engine.memtable = segment.Memtable.init(allocator);
         errdefer engine.memtable.deinit();
         engine.segments = .empty;
@@ -415,6 +437,12 @@ pub const Engine = struct {
     /// the right response: the alternative is the silent data race that
     /// Zig's memory model leaves as undefined behavior.
     fn assertOwnedByCurrentThread(self: *Engine) void {
+        // Embedders that serialize access externally (own mutex + rw_lock) and
+        // drive the engine from a worker-thread pool opt out via
+        // EngineConfig.single_writer_thread_check = false. This gates ONLY the
+        // thread-identity assert; no lock is disabled, so concurrency safety
+        // still holds (rw_lock for mutators, quiescence contract for deinit).
+        if (!self.owning_thread_check) return;
         if (std.debug.runtime_safety) {
             std.debug.assert(self.owning_thread == std.Thread.getCurrentId());
         }
