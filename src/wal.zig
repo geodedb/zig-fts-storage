@@ -5,6 +5,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const utils = @import("utils.zig");
 const limits = @import("limits.zig");
+const backend = @import("crypto_backend");
 
 pub const Error = @import("errors.zig").WalError;
 
@@ -164,9 +165,13 @@ pub const WalWriter = struct {
         // Without a key the bytes on disk are unchanged from the pre-WRK-037
         // format, so existing data files and tests remain valid.
         if (self.hmac_key) |key| {
+            // fips-exempt: compile-time tag length only (HMAC goes through the seam).
             const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
             var tag: [Hmac.mac_length]u8 = undefined;
-            Hmac.create(&tag, self.scratch.items, key);
+            // FIPS-0004: integrity HMAC-SHA256 via the seam. Tag is computed
+            // over the full serialized record (header || payload || crc),
+            // preserving the pre-WRK-037 wire format byte-for-byte.
+            _ = backend.Mac.hmac(.sha256, key, self.scratch.items, &tag) catch return error.InvalidData;
             try self.scratch.appendSlice(self.allocator, &tag);
         }
 
@@ -253,6 +258,8 @@ pub const WalReader = struct {
         var crc_pos: usize = payload_len;
         const stored_crc = utils.readU32Le(payload_and_crc, &crc_pos);
 
+        // fips-exempt: non-security — CRC32c data-integrity checksum, not a MAC
+        // (the optional HMAC trailer below covers integrity-against-adversary).
         var hasher = std.hash.crc.Crc32Iscsi.init();
         hasher.update(&header_buf);
         hasher.update(payload);
@@ -264,17 +271,24 @@ pub const WalReader = struct {
         // The tag is computed over (header || payload || crc) at write time,
         // so we re-compute over the same bytes here.
         if (self.hmac_key) |key| {
+            // fips-exempt: compile-time tag length only (HMAC goes through the seam).
             const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
             var stored_tag: [Hmac.mac_length]u8 = undefined;
             var tag_iov = [_][]u8{&stored_tag};
             const read_tag = try self.file.readStreaming(self.io, &tag_iov);
             if (read_tag < Hmac.mac_length) return error.Incomplete;
 
+            // FIPS-0004: integrity HMAC-SHA256 via the seam. The one-shot seam
+            // requires a contiguous message, so we re-assemble the exact bytes
+            // tagged at write time (header || payload || crc) into a scratch
+            // buffer — byte-identical to the previous incremental computation.
+            const msg = try self.allocator.alloc(u8, header_buf.len + payload_and_crc.len);
+            defer self.allocator.free(msg);
+            @memcpy(msg[0..header_buf.len], &header_buf);
+            @memcpy(msg[header_buf.len..], payload_and_crc);
+
             var computed_tag: [Hmac.mac_length]u8 = undefined;
-            var hmac_ctx = Hmac.init(key);
-            hmac_ctx.update(&header_buf);
-            hmac_ctx.update(payload_and_crc);
-            hmac_ctx.final(&computed_tag);
+            _ = backend.Mac.hmac(.sha256, key, msg, &computed_tag) catch return error.InvalidData;
 
             if (!std.mem.eql(u8, &stored_tag, &computed_tag)) return error.HmacMismatch;
         }

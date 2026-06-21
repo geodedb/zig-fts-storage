@@ -137,8 +137,8 @@ pub inline fn writeVarInt(buf: []u8, value: u64) !usize {
 /// because callers only know the u32 result. Until then the table-driven
 /// implementation is ~1.2 GiB/s on x86_64 which is still fast enough that
 /// CRC is dominated by the surrounding I/O.
-// fips-exempt: non-security — CRC32c data-integrity checksum, never a MAC.
 pub fn hashCrc32c(data: []const u8) u32 {
+    // fips-exempt: non-security — CRC32c data-integrity checksum, never a MAC.
     return std.hash.crc.Crc32Iscsi.hash(data);
 }
 
@@ -155,7 +155,9 @@ pub fn hashCrc32c(data: []const u8) u32 {
 
 // fips-exempt: compile-time nonce/tag/key sizes only; the AEAD goes through the seam.
 pub const AEAD_NONCE_LEN: usize = std.crypto.aead.aes_gcm.Aes256Gcm.nonce_length;
+// fips-exempt: compile-time tag size only; the AEAD goes through the seam.
 pub const AEAD_TAG_LEN: usize = std.crypto.aead.aes_gcm.Aes256Gcm.tag_length;
+// fips-exempt: compile-time key size only; the AEAD goes through the seam.
 pub const AEAD_KEY_LEN: usize = std.crypto.aead.aes_gcm.Aes256Gcm.key_length;
 pub const AEAD_OVERHEAD: usize = AEAD_NONCE_LEN + AEAD_TAG_LEN;
 
