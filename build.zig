@@ -9,6 +9,7 @@ fn importedModule(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     module: *std.Build.Module,
+    crypto_backend_mod: *std.Build.Module,
 ) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path(path),
@@ -16,6 +17,7 @@ fn importedModule(
         .optimize = optimize,
         .imports = &.{
             .{ .name = "fts_storage", .module = module },
+            .{ .name = "crypto_backend", .module = crypto_backend_mod },
         },
     });
 }
@@ -45,6 +47,61 @@ pub fn build(b: *std.Build) void {
     const asan = b.option(bool, "asan", "Enable max-safety sanitizers on test artifacts (SEC-EXT-0605)") orelse false;
     const no_cli = b.option(bool, "no-cli", "Skip building the CLI executable and the `run` step (library-only build for downstream consumers)") orelse false;
 
+    // -------------------------------------------------------------------------
+    // FIPS-140-3 seam (GAP-0020-safe: exactly ONE build_options instance).
+    // Off by default with zero overhead; -Dfips=true routes security crypto
+    // through the linked OpenSSL FIPS provider via the lazy `fips` dep.
+    // -------------------------------------------------------------------------
+    const fips = b.option(bool, "fips", "Route security crypto through the linked FIPS-140-3 provider (off by default; zero overhead when off)") orelse false;
+    const openssl_path = b.option([]const u8, "openssl_path", "OpenSSL install prefix for non-standard installs (e.g. /usr/local/ssl)");
+    const link = @import("src/link.zig");
+
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "fips", fips);
+    const build_options_mod = build_options.createModule();
+
+    const crypto_backend_mod = b.addModule("crypto_backend", .{
+        .root_source_file = b.path("src/crypto_backend.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "build_options", .module = build_options_mod }},
+    });
+    const std_shim_mod = b.addModule("std_shim", .{
+        .root_source_file = b.path("src/std_shim.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    crypto_backend_mod.addImport("std_shim", std_shim_mod);
+    if (fips) {
+        if (b.lazyDependency("fips", .{ .target = target, .optimize = optimize, .openssl_path = openssl_path orelse "/usr/local/ssl" })) |fips_dep| {
+            const fips_mod = fips_dep.module("fips");
+            crypto_backend_mod.addImport("fips", fips_mod);
+            link.linkOpenssl(b, fips_mod, openssl_path);
+        }
+    }
+
+    // A ReleaseFast copy of the seam for the bench library (benchmarks force
+    // ReleaseFast and root src/root.zig as a separate module instance).
+    const crypto_backend_bench_mod = b.addModule("crypto_backend_bench", .{
+        .root_source_file = b.path("src/crypto_backend.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .imports = &.{.{ .name = "build_options", .module = build_options_mod }},
+    });
+    const std_shim_bench_mod = b.addModule("std_shim_bench", .{
+        .root_source_file = b.path("src/std_shim.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    crypto_backend_bench_mod.addImport("std_shim", std_shim_bench_mod);
+    if (fips) {
+        if (b.lazyDependency("fips", .{ .target = target, .optimize = .ReleaseFast, .openssl_path = openssl_path orelse "/usr/local/ssl" })) |fips_dep| {
+            const fips_mod = fips_dep.module("fips");
+            crypto_backend_bench_mod.addImport("fips", fips_mod);
+            link.linkOpenssl(b, fips_mod, openssl_path);
+        }
+    }
+
     // ------------------------------------------------------------------
     // Library module — primary public surface for downstream consumers.
     // ------------------------------------------------------------------
@@ -52,6 +109,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "crypto_backend", .module = crypto_backend_mod },
+        },
     });
 
     const static_lib = b.addLibrary(.{
@@ -75,6 +135,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "fts_storage", .module = module },
+                .{ .name = "crypto_backend", .module = crypto_backend_mod },
             },
         });
         const cli_exe = b.addExecutable(.{
@@ -113,7 +174,7 @@ pub fn build(b: *std.Build) void {
 
     const integration_step = b.step("test-integration", "Run integration tests");
     const integration_tests = b.addTest(.{
-        .root_module = importedModule(b, "tests/integration.zig", target, optimize, module),
+        .root_module = importedModule(b, "tests/integration.zig", target, optimize, module, crypto_backend_mod),
     });
     if (tsan) integration_tests.root_module.sanitize_thread = true;
     if (asan) integration_tests.root_module.sanitize_c = .full;
@@ -124,7 +185,7 @@ pub fn build(b: *std.Build) void {
     // invocation exercises both the happy path and the deliberate-tamper
     // scenarios.
     const fault_tests = b.addTest(.{
-        .root_module = importedModule(b, "tests/fault_injection.zig", target, optimize, module),
+        .root_module = importedModule(b, "tests/fault_injection.zig", target, optimize, module, crypto_backend_mod),
     });
     if (tsan) fault_tests.root_module.sanitize_thread = true;
     if (asan) fault_tests.root_module.sanitize_c = .full;
@@ -134,7 +195,7 @@ pub fn build(b: *std.Build) void {
     const stress_optimize: std.builtin.OptimizeMode = if (tsan) .Debug else .ReleaseFast;
     const stress_step = b.step("test-stress", "Run stress and load tests");
     const stress_tests = b.addTest(.{
-        .root_module = importedModule(b, "tests/stress.zig", target, stress_optimize, module),
+        .root_module = importedModule(b, "tests/stress.zig", target, stress_optimize, module, crypto_backend_mod),
     });
     if (tsan) stress_tests.root_module.sanitize_thread = true;
     if (asan) stress_tests.root_module.sanitize_c = .full;
@@ -148,7 +209,7 @@ pub fn build(b: *std.Build) void {
     // test pipeline stays fast and the fuzz pipeline stays advisory.
     const fuzz_step = b.step("test-fuzz", "Run adversarial deserializer fuzz harnesses");
     const fuzz_tests = b.addTest(.{
-        .root_module = importedModule(b, "tests/fuzz_targets.zig", target, optimize, module),
+        .root_module = importedModule(b, "tests/fuzz_targets.zig", target, optimize, module, crypto_backend_mod),
     });
     if (tsan) fuzz_tests.root_module.sanitize_thread = true;
     if (asan) fuzz_tests.root_module.sanitize_c = .full;
@@ -166,7 +227,7 @@ pub fn build(b: *std.Build) void {
     const example_step = b.step("example", "Build and run the basic example");
     const example_exe = b.addExecutable(.{
         .name = "fts-storage-basic",
-        .root_module = importedModule(b, "examples/basic.zig", target, optimize, module),
+        .root_module = importedModule(b, "examples/basic.zig", target, optimize, module, crypto_backend_mod),
     });
     example_step.dependOn(&b.addRunArtifact(example_exe).step);
 
@@ -200,11 +261,14 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = .ReleaseFast,
+        .imports = &.{
+            .{ .name = "crypto_backend", .module = crypto_backend_bench_mod },
+        },
     });
 
     const bench_exe = b.addExecutable(.{
         .name = "fts-storage-bench",
-        .root_module = benchModule(b, "benchmarks/bench.zig", target, bench_lib_module, framework_module),
+        .root_module = benchModule(b, "benchmarks/bench.zig", target, bench_lib_module, framework_module, crypto_backend_bench_mod),
     });
     b.installArtifact(bench_exe);
     const run_bench = b.addRunArtifact(bench_exe);
@@ -214,7 +278,7 @@ pub fn build(b: *std.Build) void {
 
     const scale_bench_exe = b.addExecutable(.{
         .name = "fts-storage-scale-bench",
-        .root_module = benchModule(b, "benchmarks/scale.zig", target, bench_lib_module, framework_module),
+        .root_module = benchModule(b, "benchmarks/scale.zig", target, bench_lib_module, framework_module, crypto_backend_bench_mod),
     });
     b.installArtifact(scale_bench_exe);
     const run_scale_bench = b.addRunArtifact(scale_bench_exe);
@@ -241,7 +305,7 @@ pub fn build(b: *std.Build) void {
 
     const micro_example_exe = b.addExecutable(.{
         .name = "fts-storage-micro-example",
-        .root_module = benchModule(b, "benchmarks/micro/example.zig", target, bench_lib_module, framework_module),
+        .root_module = benchModule(b, "benchmarks/micro/example.zig", target, bench_lib_module, framework_module, crypto_backend_bench_mod),
     });
     const run_micro_example = b.addRunArtifact(micro_example_exe);
     if (b.args) |args| run_micro_example.addArgs(args);
@@ -250,7 +314,7 @@ pub fn build(b: *std.Build) void {
 
     const micro_varint_exe = b.addExecutable(.{
         .name = "fts-storage-micro-varint",
-        .root_module = benchModule(b, "benchmarks/micro/varint.zig", target, bench_lib_module, framework_module),
+        .root_module = benchModule(b, "benchmarks/micro/varint.zig", target, bench_lib_module, framework_module, crypto_backend_bench_mod),
     });
     const run_micro_varint = b.addRunArtifact(micro_varint_exe);
     if (b.args) |args| run_micro_varint.addArgs(args);
@@ -259,7 +323,7 @@ pub fn build(b: *std.Build) void {
 
     const micro_bm25_exe = b.addExecutable(.{
         .name = "fts-storage-micro-bm25",
-        .root_module = benchModule(b, "benchmarks/micro/bm25.zig", target, bench_lib_module, framework_module),
+        .root_module = benchModule(b, "benchmarks/micro/bm25.zig", target, bench_lib_module, framework_module, crypto_backend_bench_mod),
     });
     const run_micro_bm25 = b.addRunArtifact(micro_bm25_exe);
     if (b.args) |args| run_micro_bm25.addArgs(args);
@@ -268,7 +332,7 @@ pub fn build(b: *std.Build) void {
 
     const micro_wal_record_exe = b.addExecutable(.{
         .name = "fts-storage-micro-wal-record",
-        .root_module = benchModule(b, "benchmarks/micro/wal_record.zig", target, bench_lib_module, framework_module),
+        .root_module = benchModule(b, "benchmarks/micro/wal_record.zig", target, bench_lib_module, framework_module, crypto_backend_bench_mod),
     });
     const run_micro_wal_record = b.addRunArtifact(micro_wal_record_exe);
     if (b.args) |args| run_micro_wal_record.addArgs(args);
@@ -297,6 +361,7 @@ fn benchModule(
     target: std.Build.ResolvedTarget,
     lib_module: *std.Build.Module,
     framework_module: *std.Build.Module,
+    crypto_backend_mod: *std.Build.Module,
 ) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path(path),
@@ -305,6 +370,7 @@ fn benchModule(
         .imports = &.{
             .{ .name = "fts_storage", .module = lib_module },
             .{ .name = "framework", .module = framework_module },
+            .{ .name = "crypto_backend", .module = crypto_backend_mod },
         },
     });
 }

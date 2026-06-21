@@ -84,4 +84,5 @@ pub const TermIterator = search.TermIterator;
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("crypto_backend_smoke_test.zig");
 }
