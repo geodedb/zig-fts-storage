@@ -2,6 +2,7 @@
 // Copyright (c) 2024-2026 CodePros
 
 const std = @import("std");
+const crypto_backend = @import("crypto_backend");
 
 /// Returns a `std.Io.File.Permissions` (which is structurally the same as
 /// `std.Io.Dir.Permissions`) carrying the requested POSIX mode bits on
@@ -136,6 +137,7 @@ pub inline fn writeVarInt(buf: []u8, value: u64) !usize {
 /// because callers only know the u32 result. Until then the table-driven
 /// implementation is ~1.2 GiB/s on x86_64 which is still fast enough that
 /// CRC is dominated by the surrounding I/O.
+// fips-exempt: non-security — CRC32c data-integrity checksum, never a MAC.
 pub fn hashCrc32c(data: []const u8) u32 {
     return std.hash.crc.Crc32Iscsi.hash(data);
 }
@@ -151,6 +153,7 @@ pub fn hashCrc32c(data: []const u8) u32 {
 // nonce with the same key.
 // ============================================================================
 
+// fips-exempt: compile-time nonce/tag/key sizes only; the AEAD goes through the seam.
 pub const AEAD_NONCE_LEN: usize = std.crypto.aead.aes_gcm.Aes256Gcm.nonce_length;
 pub const AEAD_TAG_LEN: usize = std.crypto.aead.aes_gcm.Aes256Gcm.tag_length;
 pub const AEAD_KEY_LEN: usize = std.crypto.aead.aes_gcm.Aes256Gcm.key_length;
@@ -163,10 +166,13 @@ pub fn aeadEncrypt(
     allocator: std.mem.Allocator,
 ) ![]u8 {
     if (key.len != AEAD_KEY_LEN) return error.InvalidKey;
-    const Aes = std.crypto.aead.aes_gcm.Aes256Gcm;
+    // The `io` param is retained for the caller's signature; the CSPRNG now
+    // routes through the seam (FIPS DRBG under -Dfips).
+    _ = io;
 
     var nonce: [AEAD_NONCE_LEN]u8 = undefined;
-    io.random(&nonce);
+    // FIPS-0004b: per-segment random nonce via the seam.
+    crypto_backend.Csprng.bytes(&nonce) catch return error.OutOfMemory;
 
     const out = try allocator.alloc(u8, AEAD_NONCE_LEN + plaintext.len + AEAD_TAG_LEN);
     errdefer allocator.free(out);
@@ -176,14 +182,16 @@ pub fn aeadEncrypt(
     var tag: [AEAD_TAG_LEN]u8 = undefined;
     var key_arr: [AEAD_KEY_LEN]u8 = undefined;
     @memcpy(&key_arr, key[0..AEAD_KEY_LEN]);
-    Aes.encrypt(
+    // FIPS-0004b: segment AES-256-GCM seal via the seam.
+    crypto_backend.Aead.seal(
+        .aes_256_gcm,
+        &key_arr,
+        &nonce,
+        "",
+        plaintext,
         out[AEAD_NONCE_LEN .. AEAD_NONCE_LEN + plaintext.len],
         &tag,
-        plaintext,
-        "",
-        nonce,
-        key_arr,
-    );
+    ) catch return error.OutOfMemory;
     @memcpy(out[AEAD_NONCE_LEN + plaintext.len ..], &tag);
     return out;
 }
@@ -195,7 +203,6 @@ pub fn aeadDecrypt(
 ) ![]u8 {
     if (key.len != AEAD_KEY_LEN) return error.InvalidKey;
     if (ciphertext.len < AEAD_OVERHEAD) return error.CiphertextTooShort;
-    const Aes = std.crypto.aead.aes_gcm.Aes256Gcm;
 
     var nonce: [AEAD_NONCE_LEN]u8 = undefined;
     @memcpy(&nonce, ciphertext[0..AEAD_NONCE_LEN]);
@@ -212,7 +219,9 @@ pub fn aeadDecrypt(
     const out = try allocator.alloc(u8, ct.len);
     errdefer allocator.free(out);
 
-    try Aes.decrypt(out, ct, tag, "", nonce, key_arr);
+    // FIPS-0004b: segment AES-256-GCM open via the seam (auth failure ->
+    // AuthenticationFailed, preserving the existing caller contract).
+    crypto_backend.Aead.open(.aes_256_gcm, &key_arr, &nonce, "", ct, &tag, out) catch return error.AuthenticationFailed;
     return out;
 }
 
@@ -246,6 +255,8 @@ pub fn aeadDecrypt(
 ///   passing CI run. A Windows job is a follow-up.
 pub fn atomicWrite(io: std.Io, dir: std.Io.Dir, path: []const u8, data: []const u8) !void {
     var rand_bytes: [8]u8 = undefined;
+    // fips-exempt: non-security — random suffix for atomic tmp-file naming
+    // (collision avoidance), never a key.
     io.random(&rand_bytes);
 
     var tmp_path_buf: [4096]u8 = undefined;
@@ -331,4 +342,18 @@ test "atomicWrite cleans up tmp on rename failure" {
         }
     }
     try std.testing.expect(!found_tmp);
+}
+
+test "FIPS-0004b: aeadEncrypt/aeadDecrypt round-trips and rejects a flipped tag under the seam" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const key = [_]u8{0x37} ** AEAD_KEY_LEN;
+    const blob = try aeadEncrypt(io, &key, "segment payload", a);
+    defer a.free(blob);
+    const pt = try aeadDecrypt(&key, blob, a);
+    defer a.free(pt);
+    try std.testing.expectEqualStrings("segment payload", pt);
+    // Flip a ciphertext byte; GCM auth must fail.
+    blob[AEAD_NONCE_LEN] ^= 0x01;
+    try std.testing.expectError(error.AuthenticationFailed, aeadDecrypt(&key, blob, a));
 }

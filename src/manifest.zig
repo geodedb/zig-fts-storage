@@ -5,6 +5,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const utils = @import("utils.zig");
 const limits = @import("limits.zig");
+const crypto_backend = @import("crypto_backend");
 
 pub const Error = @import("errors.zig").ManifestError;
 
@@ -56,6 +57,8 @@ pub const Manifest = struct {
         // + crc(4)
         // + optional hmac_sha256(32) (only when hmac_key != null)
         const header_size = 8 + 4 + 8 + 8 + 8 + 4 + 4;
+        // fips-exempt: compile-time tag length only, not an algorithm choice
+        // (the HMAC computation itself goes through the seam below).
         const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
         const hmac_size: usize = if (hmac_key != null) Hmac.mac_length else 0;
         const total_size = header_size + (self.segments.items.len * 40) + 4 + hmac_size;
@@ -83,12 +86,15 @@ pub const Manifest = struct {
             pos += 7;
         }
 
+        // fips-exempt: non-security — CRC32c framing checksum, not
+        // integrity-against-adversary (the HMAC trailer covers that).
         const crc = utils.hashCrc32c(buf[0..pos]);
         utils.writeU32Le(buf, &pos, crc);
 
         if (hmac_key) |key| {
             var tag: [Hmac.mac_length]u8 = undefined;
-            Hmac.create(&tag, buf[0..pos], key);
+            // FIPS-0004: integrity HMAC-SHA256 via the seam.
+            _ = crypto_backend.Mac.hmac(.sha256, key, buf[0..pos], &tag) catch return error.OutOfMemory;
             @memcpy(buf[pos .. pos + Hmac.mac_length], &tag);
         }
 
@@ -104,6 +110,7 @@ pub const Manifest = struct {
         data: []const u8,
         hmac_key: ?[]const u8,
     ) !Manifest {
+        // fips-exempt: compile-time tag length only (HMAC goes through the seam).
         const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
         const hmac_trailer: usize = if (hmac_key != null) Hmac.mac_length else 0;
         const min_size = 8 + 4 + 8 + 8 + 8 + 4 + 4 + 4 + hmac_trailer;
@@ -118,11 +125,14 @@ pub const Manifest = struct {
 
         if (hmac_key) |key| {
             var computed_tag: [Hmac.mac_length]u8 = undefined;
-            Hmac.create(&computed_tag, data[0..core_end], key);
+            // FIPS-0004: integrity HMAC-SHA256 via the seam.
+            _ = crypto_backend.Mac.hmac(.sha256, key, data[0..core_end], &computed_tag) catch return error.InvalidData;
             if (!std.mem.eql(u8, data[core_end..], &computed_tag)) return error.HmacMismatch;
         }
 
         const stored_crc = utils.readU32LeAt(data, core_end - 4);
+        // fips-exempt: non-security — CRC32c framing checksum, not
+        // integrity-against-adversary (the HMAC trailer covers that).
         const computed_crc = utils.hashCrc32c(data[0 .. core_end - 4]);
         if (stored_crc != computed_crc) return error.ChecksumMismatch;
 
@@ -266,4 +276,21 @@ test "manifest deserialize rejects oversized count" {
     utils.writeU32Le(&buf, &pos, crc);
 
     try std.testing.expectError(error.SegmentCountTooLarge, Manifest.deserialize(allocator, &buf));
+}
+
+test "FIPS-0004: manifest HMAC verify still detects a flipped byte under the seam" {
+    const a = std.testing.allocator;
+    var m = Manifest{
+        .counter = 7,
+        .last_checkpoint_lsn = 11,
+        .total_docs = 3,
+        .avg_doc_len = 9,
+    };
+    defer m.deinit(a);
+    const key = [_]u8{0x42} ** 32;
+    const blob = try m.serializeWithHmac(a, &key);
+    defer a.free(blob);
+    // Tamper the last HMAC byte; deserialize must reject with HmacMismatch.
+    blob[blob.len - 1] ^= 0x01;
+    try std.testing.expectError(error.HmacMismatch, Manifest.deserializeWithHmac(a, blob, &key));
 }
