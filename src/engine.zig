@@ -382,8 +382,9 @@ pub const Engine = struct {
 
         engine.next_txn_id.store(engine.current_manifest.last_checkpoint_lsn + 1, .monotonic);
 
-        // Replay WAL
-        try engine.replayWal();
+        // Replay WAL. The returned offset is the end of the last valid
+        // record; anything beyond it is a torn tail from the crash.
+        const wal_valid_bytes = try engine.replayWal();
 
         // Build the engine-wide aggregated tombstone set so isDeleted is O(1)
         // (PERF-0006, WRK-031). Walk every segment's tombstones plus the
@@ -420,6 +421,15 @@ pub const Engine = struct {
             .permissions = utils.fileMode(0o600),
         });
         errdefer engine.wal_file.close(io);
+        // GSP-2: chop the torn tail BEFORE the writer computes its append
+        // offset. Without this, post-recovery appends land after garbage
+        // that replay breaks on — fsync-acknowledged yet unreachable. The
+        // truncation is fsynced so a second crash cannot resurrect the tail.
+        const wal_stat = try engine.wal_file.stat(io);
+        if (wal_stat.size > wal_valid_bytes) {
+            try engine.wal_file.setLength(io, wal_valid_bytes);
+            try engine.wal_file.sync(io);
+        }
         engine.wal_writer = try wal.WalWriter.initWithHmac(
             io,
             engine.wal_file,
@@ -550,12 +560,15 @@ pub const Engine = struct {
         }
     }
 
-    fn replayWal(self: *Engine) !void {
+    /// Returns the number of validated WAL bytes (the safe truncation point):
+    /// everything past it is a torn tail that future appends must overwrite,
+    /// or replay will never reach them (GSP-2).
+    fn replayWal(self: *Engine) !u64 {
         // SEC-EXT-0301: O_NOFOLLOW on the WAL — an attacker with write access
         // to the wal/ directory must not be able to redirect replay through a
         // symlink.
         const file = self.wal_dir.openFile(self.io, "fts.wal", .{ .follow_symlinks = false }) catch |err| {
-            if (err == error.FileNotFound) return;
+            if (err == error.FileNotFound) return 0;
             return err;
         };
         defer file.close(self.io);
@@ -662,6 +675,8 @@ pub const Engine = struct {
                 else => {},
             }
         }
+
+        return reader.consumed;
     }
 
     fn applyIndexDocPayload(

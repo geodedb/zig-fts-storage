@@ -145,3 +145,49 @@ test "fault: both manifests corrupt fails closed" {
 
     try std.testing.expectError(error.ManifestCorrupt, fts.Engine.init(io, alloc, tmp_dir.dir));
 }
+
+test "fault: writes after torn-tail recovery survive the next reopen (GSP-2)" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // Session 1: one committed doc, no flush, then a simulated torn append.
+    {
+        var eng = try fts.Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        const t = fts.TermPosting{ .term = "alpha", .positions = &[_]u32{1} };
+        try eng.indexDocument(1, &[_]fts.TermPosting{t});
+    }
+    {
+        var wal_dir = try tmp_dir.dir.openDir(io, "wal", .{});
+        defer wal_dir.close(io);
+        const f = try wal_dir.createFile(io, "fts.wal", .{ .truncate = false });
+        defer f.close(io);
+        const stat = try f.stat(io);
+        try f.writePositionalAll(io, &[_]u8{0xAA} ** 40, stat.size);
+        try f.sync(io);
+    }
+
+    // Session 2: recovery tolerates the torn tail; then write doc 2 (no flush).
+    {
+        var eng = try fts.Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        const t = fts.TermPosting{ .term = "beta", .positions = &[_]u32{1} };
+        try eng.indexDocument(2, &[_]fts.TermPosting{t});
+    }
+
+    // Session 3: BOTH docs must be replayable. Pre-fix, doc 2 was appended
+    // after the torn bytes so replay stops before it — fsync-acknowledged
+    // data silently lost.
+    {
+        var eng = try fts.Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        var it_a = try fts.TermIterator.init(alloc, eng, "alpha");
+        defer it_a.deinit();
+        try std.testing.expect((try it_a.next()) != null);
+        var it_b = try fts.TermIterator.init(alloc, eng, "beta");
+        defer it_b.deinit();
+        try std.testing.expect((try it_b.next()) != null);
+    }
+}
