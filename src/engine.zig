@@ -1095,6 +1095,9 @@ pub const Engine = struct {
         // after this point fails we must remove it so it does not become an
         // orphan referenced by no manifest.
         //
+        // Segment file data is fsynced inside SegmentWriter.writeFile (GSP-7)
+        // so Phase 2's durable manifest never references volatile pages.
+        //
         // Pre-format the segment directory name so the errdefer below cannot
         // itself fail — defer expressions cannot contain `return`/`try`.
         var seg_name_buf: [32]u8 = undefined;

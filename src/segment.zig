@@ -216,6 +216,15 @@ pub const SegmentWriter = struct {
         } else {
             try file.writeStreamingAll(self.io, buf);
         }
+
+        // GSP-7: fsync segment data BEFORE flushLocked Phase 2 publishes a
+        // manifest referencing this file and Phase 3 truncates the WAL.
+        // Without this, a durable manifest can point at torn segment pages
+        // that no WAL replay can repair (durable-reference/volatile-data
+        // inversion). Directory-entry durability (the rename/creation
+        // itself) remains a documented std.Io.Dir limitation — see
+        // utils.atomicWrite.
+        try file.sync(self.io);
     }
 
     /// Per-doc length normalization data (norms.bin) for BM25 scoring
