@@ -37,6 +37,9 @@ pub const SegmentError = error{
     PostingsTooLarge,
     PositionCountTooLarge,
     PositionOutOfRange,
+    /// Segment file carries an envelope version this binary does not
+    /// implement (GSP-9). Deployment condition, not corruption.
+    UnsupportedSegmentVersion,
 };
 
 pub const EngineError = error{

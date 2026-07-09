@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI/CD pipeline
 - Documentation
 
+### Changed
+
+- Segment files (terms.hash, postings.bin, tombstones.bin, norms.bin) are now
+  written with a versioned, CRC32C-checksummed envelope (v2). Legacy naked
+  segments remain readable forever (read-both). Older binaries opening v2
+  segments fail loudly at their count guards rather than misparsing.
+
 ## [0.1.0] - 2026-05-26
 
 ### Added

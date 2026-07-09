@@ -182,6 +182,56 @@ Per segment files (minimal set):
 - `deletes.bitset` or `tombstones.bin`
   Marks deleted local docids; applied at query time; cleared/compacted on merge.
 
+#### Segment file envelope (v2, GSP-9)
+
+As implemented in `src/segment.zig`, every segment file (`terms.hash`,
+`postings.bin`, `tombstones.bin`, `norms.bin`) is wrapped in a uniform,
+versioned, checksummed envelope:
+
+```
+magic(4)="FSG2" | version(4, u32 LE = 2) | payload | crc32c(4, over magic..payload)
+```
+
+- The envelope is applied **inside** the AEAD envelope when at-rest
+  encryption (WRK-038) is enabled — i.e. the plaintext that gets AEAD-sealed
+  is itself the v2-enveloped payload, so `nonce || AEAD(magic|version|payload|crc32c) || tag`
+  is what lands on disk.
+- **Downgrade-safe by construction:** the magic's four bytes (`'F','S','G','2'`)
+  deliberately decode, as the little-endian `u32` `count` field every legacy
+  parser reads first, to `0x32475346` = 843,600,710 — far above every
+  `MAX_*_PER_SEGMENT` cap (2^24). An old (pre-v2) binary that opens a v2
+  `terms.hash` therefore fails loudly at its existing count guard
+  (`error.TermCountTooLarge`) instead of misparsing the file as valid data.
+  This mirrors graph-storage's slab-marker trick for cross-layout misroutes.
+- **Read-both, forever:** format is detected exactly once per segment, on
+  `terms.hash` (the only file whose magic-sniff is unambiguous). Files
+  without the magic parse as legacy (v1, naked) exactly as before v2 shipped
+  — there is no sunset date for this fallback. Once `terms.hash` establishes
+  the segment's format, `postings.bin`, `tombstones.bin`, and `norms.bin`
+  must match it: `.enveloped` segments require and strip the envelope from
+  every file; `.legacy` segments read every file verbatim. In particular,
+  `postings.bin` is never independently magic-sniffed on a legacy segment —
+  a legacy postings.bin's varint stream could coincidentally start with the
+  same four bytes as valid delta-coded posting data, so the format decision
+  is made once, on the unambiguous file, and trusted thereafter.
+- **Plaintext `postings.bin` CRC exemption (documented, intentional):** the
+  positional-read path used for plaintext (non-AEAD) postings.bin verifies
+  only the 8-byte magic+version header at segment open (`postings_base = 8`,
+  payload size = `stat.size - 12`) — it does *not* checksum the whole file,
+  since that would force an O(file) read on every open purely to validate a
+  file whose postings are read positionally anyway. Integrity for this path
+  rests on three other layers: the checked varint decode in `PostingIterator`
+  (GSP-4, rejects overflow/out-of-range instead of misparsing), the
+  dictionary extent validation against the postings file size at load
+  (GSP-5), and the full CRC32C check when AEAD encryption is enabled (the
+  encrypted path always materializes and CRC-validates the whole postings
+  buffer at open, since AEAD ciphertext isn't random-accessible).
+- Version mismatches (`version != 2` inside a recognized-magic file) surface
+  as `error.UnsupportedSegmentVersion` — a deployment condition (binary too
+  old for the on-disk format), never silently misparsed and never confused
+  with `error.ChecksumMismatch` (payload corruption under a version this
+  binary *does* understand).
+
 Constraints from current semantics:
 
 - Current `FullTextIndex` tokenization stores per-token offsets and positions, so the recommended postings format must support **positions** (at minimum) to enable phrase/proximity/highlight correctly. citeturn10view0turn49view0
