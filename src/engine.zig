@@ -1342,6 +1342,26 @@ pub const Engine = struct {
             .created_lsn = self.next_txn_id.load(.monotonic) - 1,
             .level = 1,
         });
+        // GSP-8 (graph-storage parity): compaction is the one point where
+        // the whole live corpus is materialized, so heal the checkpoint-
+        // granular corpus stats here — deletes never decrement total_docs
+        // and BM25 consumes both fields (search.zig computeScore). Re-index
+        // double-counting across segments remains documented in
+        // search.zig:134-138; after compact there is a single segment, so
+        // the healed values are exact.
+        const merged_token_len: u64 = blk: {
+            var sum: u64 = 0;
+            var stat_it = merged_mt.dictionary.iterator();
+            while (stat_it.next()) |entry| {
+                for (entry.value_ptr.tfs.items) |tf| sum += tf;
+            }
+            break :blk sum;
+        };
+        self.current_manifest.total_docs = merged_mt.total_docs;
+        self.current_manifest.avg_doc_len = if (merged_mt.total_docs > 0)
+            std.math.cast(u32, @divTrunc(merged_token_len, merged_mt.total_docs)) orelse std.math.maxInt(u32)
+        else
+            0;
         self.current_manifest.counter += 1;
         const man_file = if (self.current_manifest.counter % 2 == 0) "manifest.a" else "manifest.b";
         try self.current_manifest.writeToFileWithHmac(

@@ -219,3 +219,44 @@ test "cross-thread embedding with single_writer_thread_check=false" {
     try std.testing.expect(eng.all_tombstones.contains(1));
     try std.testing.expect(!eng.all_tombstones.contains(2));
 }
+
+test "integration: compact heals total_docs and avg_doc_len (GSP-8)" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    {
+        var eng = try fts.Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        // 4 docs, 2 tokens each.
+        var doc_id: u64 = 1;
+        while (doc_id <= 4) : (doc_id += 1) {
+            const t = fts.TermPosting{ .term = "common", .positions = &[_]u32{ 1, 2 } };
+            try eng.indexDocument(doc_id, &[_]fts.TermPosting{t});
+        }
+        try eng.flush();
+        try std.testing.expectEqual(@as(u64, 4), eng.current_manifest.total_docs);
+
+        // Delete half, flush the tombstones as a second segment.
+        try eng.deleteDocument(1);
+        try eng.deleteDocument(2);
+        try eng.flush();
+        // Stale by design pre-compact: deletes don't decrement.
+        try std.testing.expectEqual(@as(u64, 4), eng.current_manifest.total_docs);
+
+        // Compact drops the tombstoned docs physically; the manifest stats
+        // must converge to the merged truth (GSP-8). Pre-fix: stays 4.
+        try eng.compact();
+        try std.testing.expectEqual(@as(u64, 2), eng.current_manifest.total_docs);
+        try std.testing.expectEqual(@as(u32, 2), eng.current_manifest.avg_doc_len);
+    }
+
+    // Healed values are durable across reopen.
+    {
+        var eng = try fts.Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        try std.testing.expectEqual(@as(u64, 2), eng.current_manifest.total_docs);
+        try std.testing.expectEqual(@as(u32, 2), eng.current_manifest.avg_doc_len);
+    }
+}
