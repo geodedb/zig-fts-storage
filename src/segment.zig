@@ -523,7 +523,11 @@ pub const SegmentReader = struct {
 
             const doc_delta = try utils.readVarInt(self.data[self.pos..]);
             self.pos += doc_delta.bytes_read;
-            self.last_doc_id += doc_delta.val;
+            // GSP-4: disk-derived deltas get checked arithmetic in every
+            // build mode — a corrupt delta must surface as an error, never
+            // a panic (Debug/ReleaseSafe) or silent wrap (ReleaseFast).
+            self.last_doc_id = std.math.add(u64, self.last_doc_id, doc_delta.val) catch
+                return error.InvalidData;
 
             const tf_res = try utils.readVarInt(self.data[self.pos..]);
             self.pos += tf_res.bytes_read;
@@ -540,7 +544,10 @@ pub const SegmentReader = struct {
             while (i < tf) : (i += 1) {
                 const pos_delta = try utils.readVarInt(self.data[self.pos..]);
                 self.pos += pos_delta.bytes_read;
-                last_pos += @intCast(pos_delta.val);
+                const delta32 = std.math.cast(u32, pos_delta.val) orelse
+                    return error.PositionOutOfRange;
+                last_pos = std.math.add(u32, last_pos, delta32) catch
+                    return error.PositionOutOfRange;
                 self.pos_buf.appendAssumeCapacity(last_pos);
             }
 
@@ -563,7 +570,10 @@ pub const SegmentReader = struct {
 
             const doc_delta = try utils.readVarInt(self.data[self.pos..]);
             self.pos += doc_delta.bytes_read;
-            self.last_doc_id += doc_delta.val;
+            // GSP-4: same checked add as `next` — corrupt delta streams
+            // must error, never panic or wrap.
+            self.last_doc_id = std.math.add(u64, self.last_doc_id, doc_delta.val) catch
+                return error.InvalidData;
 
             const tf_res = try utils.readVarInt(self.data[self.pos..]);
             self.pos += tf_res.bytes_read;
@@ -856,4 +866,97 @@ test "memtable and segment write/read roundtrip" {
 
     try std.testing.expectEqual(@as(usize, 1), reader.tombstones.count());
     try std.testing.expect(reader.tombstones.contains(3));
+}
+
+test "PostingIterator rejects doc-id delta overflow instead of panicking (GSP-4)" {
+    const alloc = std.testing.allocator;
+    // Posting 1: doc delta = maxInt(u64), tf = 1, one position delta 1.
+    // Posting 2: doc delta = 1 -> u64 overflow on accumulate.
+    var data: std.ArrayListUnmanaged(u8) = .empty;
+    defer data.deinit(alloc);
+    var vbuf: [10]u8 = undefined;
+    var w = try utils.writeVarInt(&vbuf, std.math.maxInt(u64));
+    try data.appendSlice(alloc, vbuf[0..w]);
+    w = try utils.writeVarInt(&vbuf, 1); // tf
+    try data.appendSlice(alloc, vbuf[0..w]);
+    w = try utils.writeVarInt(&vbuf, 1); // pos delta
+    try data.appendSlice(alloc, vbuf[0..w]);
+    w = try utils.writeVarInt(&vbuf, 1); // posting 2 doc delta -> overflow
+    try data.appendSlice(alloc, vbuf[0..w]);
+    w = try utils.writeVarInt(&vbuf, 1); // tf
+    try data.appendSlice(alloc, vbuf[0..w]);
+    w = try utils.writeVarInt(&vbuf, 1); // pos delta
+    try data.appendSlice(alloc, vbuf[0..w]);
+
+    var it = SegmentReader.PostingIterator{
+        .allocator = alloc,
+        .data = data.items,
+        .owns_data = false,
+        .df = 2,
+        .current_idx = 0,
+        .pos = 0,
+        .last_doc_id = 0,
+        .pos_buf = .empty,
+    };
+    defer it.pos_buf.deinit(alloc);
+    _ = try it.next(); // posting 1: doc_id = maxInt, fine
+    try std.testing.expectError(error.InvalidData, it.next());
+}
+
+test "PostingIterator rejects oversized position delta instead of panicking (GSP-4)" {
+    const alloc = std.testing.allocator;
+    // One posting: doc delta 1, tf 1, position delta maxInt(u64) — the
+    // unchecked @intCast to u32 used to panic (Debug/ReleaseSafe) or wrap
+    // silently (ReleaseFast).
+    var data: std.ArrayListUnmanaged(u8) = .empty;
+    defer data.deinit(alloc);
+    var vbuf: [10]u8 = undefined;
+    var w = try utils.writeVarInt(&vbuf, 1);
+    try data.appendSlice(alloc, vbuf[0..w]);
+    w = try utils.writeVarInt(&vbuf, 1);
+    try data.appendSlice(alloc, vbuf[0..w]);
+    w = try utils.writeVarInt(&vbuf, std.math.maxInt(u64));
+    try data.appendSlice(alloc, vbuf[0..w]);
+
+    var it = SegmentReader.PostingIterator{
+        .allocator = alloc,
+        .data = data.items,
+        .owns_data = false,
+        .df = 1,
+        .current_idx = 0,
+        .pos = 0,
+        .last_doc_id = 0,
+        .pos_buf = .empty,
+    };
+    defer it.pos_buf.deinit(alloc);
+    try std.testing.expectError(error.PositionOutOfRange, it.next());
+}
+
+test "nextDocOnly rejects doc-id delta overflow (GSP-4)" {
+    const alloc = std.testing.allocator;
+    var data: std.ArrayListUnmanaged(u8) = .empty;
+    defer data.deinit(alloc);
+    var vbuf: [10]u8 = undefined;
+    var w = try utils.writeVarInt(&vbuf, std.math.maxInt(u64));
+    try data.appendSlice(alloc, vbuf[0..w]);
+    w = try utils.writeVarInt(&vbuf, 0); // tf = 0, no positions
+    try data.appendSlice(alloc, vbuf[0..w]);
+    w = try utils.writeVarInt(&vbuf, 1); // posting 2 delta -> overflow
+    try data.appendSlice(alloc, vbuf[0..w]);
+    w = try utils.writeVarInt(&vbuf, 0);
+    try data.appendSlice(alloc, vbuf[0..w]);
+
+    var it = SegmentReader.PostingIterator{
+        .allocator = alloc,
+        .data = data.items,
+        .owns_data = false,
+        .df = 2,
+        .current_idx = 0,
+        .pos = 0,
+        .last_doc_id = 0,
+        .pos_buf = .empty,
+    };
+    defer it.pos_buf.deinit(alloc);
+    _ = try it.nextDocOnly();
+    try std.testing.expectError(error.InvalidData, it.nextDocOnly());
 }
