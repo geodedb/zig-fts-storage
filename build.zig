@@ -218,6 +218,11 @@ pub fn build(b: *std.Build) void {
     const all_tests_step = b.step("test-all", "Run unit, integration, and stress suites");
     all_tests_step.dependOn(&b.addRunArtifact(unit_tests).step);
     all_tests_step.dependOn(&b.addRunArtifact(integration_tests).step);
+    // GSP: fault-injection tests were reachable only via test-integration;
+    // test-all silently skipped them (a suite the build references but the
+    // umbrella never runs — the exact test-infrastructure failure mode this
+    // hardening train guards against).
+    all_tests_step.dependOn(&b.addRunArtifact(fault_tests).step);
     all_tests_step.dependOn(&b.addRunArtifact(stress_tests).step);
     all_tests_step.dependOn(&b.addRunArtifact(fuzz_tests).step);
 
