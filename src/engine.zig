@@ -279,6 +279,13 @@ pub const Engine = struct {
         // is explicitly designed to recover from bit rot, not tampering.
         if (res_a == .hmac_mismatch or res_b == .hmac_mismatch) return error.HmacMismatch;
 
+        // GSP-6: a format_version this binary does not implement is a
+        // deployment condition (upgrade/downgrade mismatch), not corruption.
+        // It must never be masked by the A/B corrupt-slot fallback — fail
+        // loud on either slot, just like HmacMismatch above.
+        if (res_a == .unsupported_version or res_b == .unsupported_version)
+            return error.UnsupportedManifestVersion;
+
         if (res_a == .corrupt and res_b == .corrupt) return error.ManifestCorrupt;
 
         const man_a: ?manifest.Manifest = if (res_a == .ok) res_a.ok else null;
@@ -503,8 +510,12 @@ pub const Engine = struct {
         const size_usize = std.math.cast(usize, stat.size) orelse return error.ManifestTooLarge;
         const data = try allocator.alloc(u8, size_usize);
         defer allocator.free(data);
-        var iov = [_][]u8{data};
-        _ = try file.readStreaming(io, &iov);
+        var index: usize = 0;
+        while (index < size_usize) {
+            const amt = try file.readPositional(io, &.{data[index..]}, index);
+            if (amt == 0) return error.InvalidData; // file shrank under us
+            index += amt;
+        }
         return try manifest.Manifest.deserializeWithHmac(allocator, data, hmac_key);
     }
 
@@ -526,6 +537,9 @@ pub const Engine = struct {
         /// caller can fail loud rather than silently fall back to the other
         /// slot — wrong key / tampering must not be hidden.
         hmac_mismatch,
+        /// File parsed and CRC-validated but its format_version is not one
+        /// this binary implements. Fail-loud like hmac_mismatch (GSP-6).
+        unsupported_version,
     };
 
     /// Three-state result with a fourth out-of-band `hmac_mismatch`. HMAC
@@ -548,6 +562,7 @@ pub const Engine = struct {
             // Surface HMAC mismatch separately so a wrong key fails loud
             // instead of being indistinguishable from generic corruption.
             error.HmacMismatch => return .hmac_mismatch,
+            error.UnsupportedManifestVersion => return .unsupported_version,
             // Treat any parse / validation failure as "this slot is
             // unusable". The caller only fails closed when *both* slots
             // are unusable; one corrupt slot still allows recovery from

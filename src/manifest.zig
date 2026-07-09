@@ -139,6 +139,11 @@ pub const Manifest = struct {
         var pos: usize = 8;
         var m = Manifest{};
         m.format_version = utils.readU32Le(data, &pos);
+        // GSP-6: exact-version gate. Runs AFTER CRC so random corruption of
+        // the version field still reports ChecksumMismatch; a structurally
+        // valid manifest from a different binary generation reports
+        // UnsupportedManifestVersion. Never discriminate by length alone.
+        if (m.format_version != MANIFEST_VERSION) return error.UnsupportedManifestVersion;
         m.counter = utils.readU64Le(data, &pos);
         m.last_checkpoint_lsn = utils.readU64Le(data, &pos);
         m.total_docs = utils.readU64Le(data, &pos);
@@ -276,6 +281,27 @@ test "manifest deserialize rejects oversized count" {
     utils.writeU32Le(&buf, &pos, crc);
 
     try std.testing.expectError(error.SegmentCountTooLarge, Manifest.deserialize(allocator, &buf));
+}
+
+test "manifest deserialize rejects unknown format_version loudly (GSP-6)" {
+    const allocator = std.testing.allocator;
+    var m = Manifest{ .counter = 5 };
+    const data = try m.serialize(allocator);
+    defer allocator.free(data);
+
+    // Forge a "future" v3 manifest with a VALID CRC — exactly what a newer
+    // binary would write. Length-only or CRC-only gating cannot catch this;
+    // graph-storage learned that the hard way in both directions.
+    var pos: usize = 8;
+    utils.writeU32Le(data, &pos, 3);
+    const crc = utils.hashCrc32c(data[0 .. data.len - 4]);
+    pos = data.len - 4;
+    utils.writeU32Le(data, &pos, crc);
+
+    try std.testing.expectError(
+        error.UnsupportedManifestVersion,
+        Manifest.deserialize(allocator, data),
+    );
 }
 
 test "FIPS-0004: manifest HMAC verify still detects a flipped byte under the seam" {

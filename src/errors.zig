@@ -20,6 +20,11 @@ pub const ManifestError = error{
     ManifestTooLarge,
     SegmentCountTooLarge,
     NoManifest,
+    /// Manifest carries a format_version this binary does not implement.
+    /// Fail-loud downgrade/upgrade gate (GSP-6): a version mismatch is a
+    /// deployment condition, not corruption — it must never be masked by
+    /// the A/B corrupt-slot fallback or misparsed at a guessed layout.
+    UnsupportedManifestVersion,
 };
 
 pub const SegmentError = error{
@@ -60,4 +65,9 @@ pub const EngineError = error{
     /// still exhaust memory across many records — this aggregate bound is
     /// the second line of defense.
     WalTooLarge,
+    /// Manifest carries a format_version this binary does not implement.
+    /// Fail-loud downgrade/upgrade gate (GSP-6): a version mismatch is a
+    /// deployment condition, not corruption — it must never be masked by
+    /// the A/B corrupt-slot fallback or misparsed at a guessed layout.
+    UnsupportedManifestVersion,
 };

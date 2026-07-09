@@ -330,3 +330,48 @@ test "fault: skipped unknown-type WAL record still heals txn allocator (GSP-3 fo
         try std.testing.expect((try it_f.next()) != null);
     }
 }
+
+test "fault: future-version manifest fails engine init loudly, not as corrupt-slot fallback (GSP-6)" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // Produce a valid store, then stamp BOTH manifest slots to version 3
+    // with recomputed CRCs (simulating a newer binary's store opened by
+    // this one). One-slot-v3 must also fail loud, so stamp both to prove
+    // no fallback path swallows it.
+    {
+        var eng = try fts.Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        const t = fts.TermPosting{ .term = "v", .positions = &[_]u32{1} };
+        try eng.indexDocument(1, &[_]fts.TermPosting{t});
+        try eng.flush();
+    }
+    for ([_][]const u8{ "manifest.a", "manifest.b" }) |name| {
+        const f = tmp_dir.dir.openFile(io, name, .{ .mode = .read_write }) catch |err| {
+            if (err == error.FileNotFound) continue; // only one slot exists yet
+            return err;
+        };
+        defer f.close(io);
+        const stat = try f.stat(io);
+        const buf = try alloc.alloc(u8, @intCast(stat.size));
+        defer alloc.free(buf);
+        var idx: usize = 0;
+        while (idx < buf.len) {
+            const amt = try f.readPositional(io, &.{buf[idx..]}, idx);
+            if (amt == 0) break;
+            idx += amt;
+        }
+        std.mem.writeInt(u32, buf[8..12], 3, .little);
+        const crc = fts.utils.hashCrc32c(buf[0 .. buf.len - 4]);
+        std.mem.writeInt(u32, buf[buf.len - 4 ..][0..4], crc, .little);
+        try f.writePositionalAll(io, buf, 0);
+        try f.sync(io);
+    }
+
+    try std.testing.expectError(
+        error.UnsupportedManifestVersion,
+        fts.Engine.init(io, alloc, tmp_dir.dir),
+    );
+}
