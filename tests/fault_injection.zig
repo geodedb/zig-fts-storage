@@ -267,3 +267,66 @@ test "fault: uncommitted orphan txn is never resurrected by txn-id reuse (GSP-3)
         try std.testing.expect((try it_f.next()) != null);
     }
 }
+
+test "fault: skipped unknown-type WAL record still heals txn allocator (GSP-3 follow-up)" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // Session 1: commit doc 1 as txn 1.
+    {
+        var eng = try fts.Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        const t = fts.TermPosting{ .term = "real", .positions = &[_]u32{1} };
+        try eng.indexDocument(1, &[_]fts.TermPosting{t});
+    }
+
+    // Simulate a forward-compat record from a newer binary: a fully
+    // CRC-valid record whose type byte (9) this binary doesn't recognize.
+    // WalReader.next() skips it via error.InvalidData but still advances
+    // `consumed` (GSP-1) -- so these bytes survive on disk and their
+    // txn_id (2) must never be reissued to a new write.
+    {
+        var wal_dir = try tmp_dir.dir.openDir(io, "wal", .{});
+        defer wal_dir.close(io);
+        const f = try wal_dir.createFile(io, "fts.wal", .{ .truncate = false });
+        defer f.close(io);
+        const stat = try f.stat(io);
+
+        const future = fts.wal.WalRecord{ .record_type = .index_doc, .txn_id = 2, .doc_id = 999, .payload = "future-payload" };
+        const raw = try future.serialize(alloc);
+        defer alloc.free(raw);
+        raw[0] = 9; // unknown type
+        const crc = fts.utils.hashCrc32c(raw[0 .. raw.len - 4]);
+        std.mem.writeInt(u32, raw[raw.len - 4 ..][0..4], crc, .little);
+
+        try f.writePositionalAll(io, raw, stat.size);
+        try f.sync(io);
+    }
+
+    // Session 2: reopen. Pre-fix, the skipped record's txn_id (2) never
+    // reaches `max_seen_txn` (it's fed only by records that survive into
+    // the drained `all` list), so `next_txn_id` stays at 2 and the very
+    // next write reuses txn 2 -- the crisp pre/post-fix observable.
+    {
+        var eng = try fts.Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        try std.testing.expect(eng.next_txn_id.load(.monotonic) >= 3);
+
+        const t = fts.TermPosting{ .term = "fresh", .positions = &[_]u32{1} };
+        try eng.indexDocument(3, &[_]fts.TermPosting{t});
+    }
+
+    // Session 3: must reopen cleanly and "fresh" must be visible. (The
+    // unknown-type record never gets its payload parsed at all, so no
+    // ghost term can appear here regardless -- the load-bearing assertion
+    // is `next_txn_id` in session 2 above.)
+    {
+        var eng = try fts.Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        var it_f = try fts.TermIterator.init(alloc, eng, "fresh");
+        defer it_f.deinit();
+        try std.testing.expect((try it_f.next()) != null);
+    }
+}

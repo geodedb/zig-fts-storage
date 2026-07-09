@@ -646,10 +646,15 @@ pub const Engine = struct {
         }
 
         // Heal the txn-id allocator past everything the tail contains —
-        // including uncommitted residue (GSP-3). Replay runs single-threaded
+        // including uncommitted residue (GSP-3) and records that `next()`
+        // skipped via error.InvalidData (unknown type / HMAC-backend
+        // failure). Those records' bytes are preserved by truncation just
+        // like any other CRC-valid record, so their txn_id must never be
+        // reissued either (GSP-3 follow-up). Replay runs single-threaded
         // inside init, so plain load+store is safe; atomics for consistency.
-        if (max_seen_txn >= self.next_txn_id.load(.monotonic)) {
-            self.next_txn_id.store(max_seen_txn + 1, .monotonic);
+        const heal_txn = @max(max_seen_txn, reader.max_skipped_txn);
+        if (heal_txn >= self.next_txn_id.load(.monotonic)) {
+            self.next_txn_id.store(heal_txn + 1, .monotonic);
         }
 
         // Second pass: build the set of committed txn_ids.

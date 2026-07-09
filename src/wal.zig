@@ -204,6 +204,11 @@ pub const WalReader = struct {
     /// returning `error.HmacMismatch` on failure. Default null preserves the
     /// pre-WRK-037 wire format (SEC-02, SEC-EXT-0401, GAP-0027).
     hmac_key: ?[]const u8 = null,
+    /// Tracks the highest txn_id among CRC-valid records that `next()`
+    /// skipped via `error.InvalidData` (unknown record type / HMAC-backend
+    /// failure); recovery must heal its txn allocator past these too, since
+    /// their bytes are preserved by truncation (GSP-3 follow-up).
+    max_skipped_txn: u64 = 0,
     /// Total bytes of fully-validated records consumed so far — including
     /// unknown-type records that were skipped for forward compat (their CRC
     /// verified). After a torn-tail error (Incomplete / ChecksumMismatch /
@@ -321,6 +326,7 @@ pub const WalReader = struct {
                 // later truncation-at-`consumed` chop valid, already-durable
                 // record bytes.
                 self.consumed += record_bytes + Hmac.mac_length;
+                if (txn_id > self.max_skipped_txn) self.max_skipped_txn = txn_id;
                 return error.InvalidData;
             };
 
@@ -333,6 +339,7 @@ pub const WalReader = struct {
         // stream aligned, bytes counted (GSP-1).
         const record_type = WalRecordType.fromByte(header_buf[0]) catch |err| {
             self.consumed += record_bytes;
+            if (txn_id > self.max_skipped_txn) self.max_skipped_txn = txn_id;
             return err;
         };
 
