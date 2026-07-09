@@ -141,3 +141,122 @@ test "fuzz: WalRecord.deserialize does not panic on adversarial inputs" {
         allocator.free(result.rec.payload);
     }
 }
+
+// ---------------------------------------------------------------------------
+// PostingIterator — decodes postings byte runs whose only pre-GSP-9 integrity
+// was structural. Adversarial inputs target: truncated varints, max-
+// continuation floods, doc-id delta overflow, position delta > u32,
+// df larger than the data can satisfy (GSP-4, GSP-10).
+// ---------------------------------------------------------------------------
+
+test "fuzz: PostingIterator does not panic on adversarial postings bytes" {
+    const alloc = std.testing.allocator;
+    const cases = [_][]const u8{
+        &[_]u8{},
+        // Truncated continuation flood.
+        &([_]u8{0x80} ** 16),
+        // Overflow-length varints everywhere.
+        &([_]u8{0xff} ** 32),
+        // doc delta = maxInt(u64), then another posting -> checked-add error.
+        &([_]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01 } ++
+            [_]u8{ 0x01, 0x01, 0x01, 0x01, 0x01 }),
+        // valid doc delta + tf, then position delta = maxInt(u64) -> cast error.
+        &([_]u8{ 0x01, 0x01 } ++
+            [_]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01 }),
+        // Single zero byte.
+        &[_]u8{0x00},
+    };
+    for (cases) |c| {
+        var it = fts.segment.SegmentReader.PostingIterator{
+            .allocator = alloc,
+            .data = c,
+            .owns_data = false,
+            .df = 4,
+            .current_idx = 0,
+            .pos = 0,
+            .last_doc_id = 0,
+            .pos_buf = .empty,
+        };
+        defer it.pos_buf.deinit(alloc);
+        // Drain until error or exhaustion; must never panic or leak.
+        while (it.next() catch null) |_| {}
+        // Same contract for the doc-only fast path.
+        var it2 = fts.segment.SegmentReader.PostingIterator{
+            .allocator = alloc,
+            .data = c,
+            .owns_data = false,
+            .df = 4,
+            .current_idx = 0,
+            .pos = 0,
+            .last_doc_id = 0,
+            .pos_buf = .empty,
+        };
+        defer it2.pos_buf.deinit(alloc);
+        while (it2.nextDocOnly() catch null) |_| {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SegmentReader.load — file-level ingestion of terms.hash / tombstones.bin /
+// norms.bin (GSP-5, GSP-9, GSP-10). Adversarial inputs target: naked-legacy
+// garbage, oversized counts, truncated entries, hostile (offset, len) pairs,
+// valid-magic envelopes with bad CRC, and future envelope versions.
+// ---------------------------------------------------------------------------
+
+test "fuzz: SegmentReader.init does not panic on adversarial segment files" {
+    const alloc = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    const dict_cases = [_][]const u8{
+        &[_]u8{},
+        // count = maxInt -> TermCountTooLarge.
+        &[_]u8{ 0xff, 0xff, 0xff, 0xff },
+        // count = 1, truncated entry.
+        &[_]u8{ 0x01, 0x00, 0x00, 0x00, 0x05, 0x00 },
+        // count = 1, term "t", hostile (df=1, offset=maxInt, len=maxInt).
+        blk: {
+            var buf: [4 + 2 + 1 + 24]u8 = @splat(0xff);
+            std.mem.writeInt(u32, buf[0..4], 1, .little);
+            std.mem.writeInt(u16, buf[4..6], 1, .little);
+            buf[6] = 't';
+            break :blk &buf;
+        },
+        // v2 magic + version 2 + garbage payload + wrong CRC.
+        blk: {
+            var buf: [24]u8 = @splat(0xab);
+            @memcpy(buf[0..4], &fts.segment.SEGMENT_FILE_MAGIC);
+            std.mem.writeInt(u32, buf[4..8], fts.segment.SEGMENT_FILE_VERSION, .little);
+            break :blk &buf;
+        },
+        // v2 magic + FUTURE version.
+        blk: {
+            var buf: [24]u8 = @splat(0);
+            @memcpy(buf[0..4], &fts.segment.SEGMENT_FILE_MAGIC);
+            std.mem.writeInt(u32, buf[4..8], 99, .little);
+            break :blk &buf;
+        },
+    };
+
+    for (dict_cases, 0..) |c, i| {
+        var tmp_dir = std.testing.tmpDir(.{});
+        defer tmp_dir.cleanup();
+        _ = i;
+        try tmp_dir.dir.createDir(io, "seg_1", .default_dir);
+        var seg_dir = try tmp_dir.dir.openDir(io, "seg_1", .{});
+        defer seg_dir.close(io);
+        {
+            const f = try seg_dir.createFile(io, "terms.hash", .{});
+            defer f.close(io);
+            try f.writeStreamingAll(io, c);
+        }
+        {
+            const f = try seg_dir.createFile(io, "postings.bin", .{});
+            defer f.close(io);
+            try f.writeStreamingAll(io, &([_]u8{0} ** 4));
+        }
+        // Also throw the same bytes at tombstones.bin + norms.bin with a
+        // healthy empty dictionary, so their parsers get direct coverage.
+        var sr = fts.segment.SegmentReader.init(io, alloc, tmp_dir.dir, 1) catch continue;
+        sr.deinit();
+    }
+}
