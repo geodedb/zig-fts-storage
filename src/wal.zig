@@ -204,6 +204,13 @@ pub const WalReader = struct {
     /// returning `error.HmacMismatch` on failure. Default null preserves the
     /// pre-WRK-037 wire format (SEC-02, SEC-EXT-0401, GAP-0027).
     hmac_key: ?[]const u8 = null,
+    /// Total bytes of fully-validated records consumed so far — including
+    /// unknown-type records that were skipped for forward compat (their CRC
+    /// verified). After a torn-tail error (Incomplete / ChecksumMismatch /
+    /// HmacMismatch) this still points at the end of the last good record,
+    /// so it is exactly the safe truncation point for recovery (GSP-1,
+    /// graph-storage parity: recovery frontier discipline).
+    consumed: u64 = 0,
 
     pub fn init(io: std.Io, file: std.Io.File, allocator: Allocator) WalReader {
         return .{
@@ -227,6 +234,12 @@ pub const WalReader = struct {
     /// Reads the next WAL record from the file.
     /// Returns null if EOF is reached.
     /// Returns an error if the record is corrupt or incomplete.
+    ///
+    /// GSP-1: the record-type byte is validated LAST — after payload, CRC,
+    /// and optional HMAC — so an unknown (future) record type leaves the
+    /// stream aligned on the next record and counted in `consumed`. Callers
+    /// that skip `error.InvalidData` therefore resume at a record boundary
+    /// instead of desyncing mid-record.
     pub fn next(self: *WalReader) !?WalRecord {
         var header_buf: [1 + 8 + 8 + 4]u8 = undefined;
         var header_iov = [_][]u8{&header_buf};
@@ -237,10 +250,7 @@ pub const WalReader = struct {
         if (read_header == 0) return null;
         if (read_header < header_buf.len) return error.Incomplete;
 
-        var pos: usize = 0;
-        const record_type = try WalRecordType.fromByte(header_buf[0]);
-        pos += 1;
-
+        var pos: usize = 1; // type byte validated after CRC/HMAC (GSP-1)
         const txn_id = utils.readU64Le(&header_buf, &pos);
         const doc_id = utils.readU64Le(&header_buf, &pos);
         const payload_len = utils.readU32Le(&header_buf, &pos);
@@ -267,9 +277,9 @@ pub const WalReader = struct {
 
         if (stored_crc != computed_crc) return error.ChecksumMismatch;
 
+        var record_bytes: u64 = header_buf.len + @as(u64, payload_len) + 4;
+
         // Optional HMAC-SHA256 envelope (SEC-02, SEC-EXT-0401, GAP-0027).
-        // The tag is computed over (header || payload || crc) at write time,
-        // so we re-compute over the same bytes here.
         if (self.hmac_key) |key| {
             // fips-exempt: compile-time tag length only (HMAC goes through the seam).
             const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
@@ -278,10 +288,6 @@ pub const WalReader = struct {
             const read_tag = try self.file.readStreaming(self.io, &tag_iov);
             if (read_tag < Hmac.mac_length) return error.Incomplete;
 
-            // FIPS-0004: integrity HMAC-SHA256 via the seam. The one-shot seam
-            // requires a contiguous message, so we re-assemble the exact bytes
-            // tagged at write time (header || payload || crc) into a scratch
-            // buffer — byte-identical to the previous incremental computation.
             const msg = try self.allocator.alloc(u8, header_buf.len + payload_and_crc.len);
             defer self.allocator.free(msg);
             @memcpy(msg[0..header_buf.len], &header_buf);
@@ -291,9 +297,19 @@ pub const WalReader = struct {
             _ = backend.Mac.hmac(.sha256, key, msg, &computed_tag) catch return error.InvalidData;
 
             if (!std.mem.eql(u8, &stored_tag, &computed_tag)) return error.HmacMismatch;
+            record_bytes += Hmac.mac_length;
         }
 
+        // Validate the type byte LAST: the record is structurally sound and
+        // integrity-checked, so an unknown type is a forward-compat skip —
+        // stream aligned, bytes counted (GSP-1).
+        const record_type = WalRecordType.fromByte(header_buf[0]) catch |err| {
+            self.consumed += record_bytes;
+            return err;
+        };
+
         const payload_copy = try self.allocator.dupe(u8, payload);
+        self.consumed += record_bytes;
 
         return WalRecord{
             .record_type = record_type,
@@ -396,4 +412,89 @@ test "WalReader reads records sequentially" {
         const rec3 = try reader.next();
         try std.testing.expect(rec3 == null);
     }
+}
+
+test "WalReader skips unknown record type and stays aligned (GSP-1)" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // Hand-build: [unknown-type record with valid CRC][valid index_doc record].
+    // A reader that validates the type byte before consuming the payload
+    // desyncs after the first record and misparses the second.
+    {
+        const file = try tmp_dir.dir.createFile(io, "wal_align.bin", .{});
+        defer file.close(io);
+
+        // Unknown record: serialize a valid record, then patch the type byte
+        // to 9 and recompute the CRC so only the type is "from the future".
+        const future = WalRecord{ .record_type = .index_doc, .txn_id = 7, .doc_id = 70, .payload = "future-payload" };
+        const raw = try future.serialize(alloc);
+        defer alloc.free(raw);
+        raw[0] = 9; // unknown type
+        const crc = utils.hashCrc32c(raw[0 .. raw.len - 4]);
+        std.mem.writeInt(u32, raw[raw.len - 4 ..][0..4], crc, .little);
+        try file.writePositionalAll(io, raw, 0);
+
+        const good = WalRecord{ .record_type = .index_doc, .txn_id = 8, .doc_id = 80, .payload = "good" };
+        const raw2 = try good.serialize(alloc);
+        defer alloc.free(raw2);
+        try file.writePositionalAll(io, raw2, raw.len);
+        try file.sync(io);
+    }
+
+    const file = try tmp_dir.dir.openFile(io, "wal_align.bin", .{});
+    defer file.close(io);
+    var reader = WalReader.init(io, file, alloc);
+
+    // Unknown type surfaces as InvalidData — but with the stream aligned
+    // past the whole record, and the record counted as consumed.
+    try std.testing.expectError(error.InvalidData, reader.next());
+
+    // The NEXT record must parse cleanly. Pre-fix this fails (desynced
+    // stream -> Incomplete/ChecksumMismatch/garbage).
+    const rec2 = (try reader.next()).?;
+    var r2 = rec2;
+    defer r2.deinit(alloc);
+    try std.testing.expectEqual(@as(u64, 8), r2.txn_id);
+    try std.testing.expectEqualStrings("good", r2.payload);
+}
+
+test "WalReader.consumed tracks validated bytes and freezes at a torn tail (GSP-1)" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var rec1_len: u64 = 0;
+    var rec2_len: u64 = 0;
+    {
+        const file = try tmp_dir.dir.createFile(io, "wal_consumed.bin", .{});
+        defer file.close(io);
+        var writer = try WalWriter.init(io, file, alloc);
+        defer writer.deinit();
+        try writer.append(.{ .record_type = .begin, .txn_id = 1 });
+        rec1_len = writer.offset;
+        try writer.append(.{ .record_type = .commit, .txn_id = 1 });
+        rec2_len = writer.offset - rec1_len;
+        // Torn tail: half a header of garbage.
+        try writer.file.writePositionalAll(io, &[_]u8{0xAA} ** 10, writer.offset);
+        try writer.sync();
+    }
+
+    const file = try tmp_dir.dir.openFile(io, "wal_consumed.bin", .{});
+    defer file.close(io);
+    var reader = WalReader.init(io, file, alloc);
+
+    var r1 = (try reader.next()).?;
+    r1.deinit(alloc);
+    try std.testing.expectEqual(rec1_len, reader.consumed);
+    var r2 = (try reader.next()).?;
+    r2.deinit(alloc);
+    try std.testing.expectEqual(rec1_len + rec2_len, reader.consumed);
+
+    // Torn tail: error, and consumed does NOT advance past the last good record.
+    try std.testing.expectError(error.Incomplete, reader.next());
+    try std.testing.expectEqual(rec1_len + rec2_len, reader.consumed);
 }
