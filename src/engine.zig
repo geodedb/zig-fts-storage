@@ -608,6 +608,14 @@ pub const Engine = struct {
         // than an OOM.
         var total_payload_bytes: u64 = 0;
 
+        // GSP-3 (graph-storage parity): track the max txn id across ALL
+        // drained records — committed or not. An orphan (uncommitted)
+        // bracket's id must never be re-issued: a later writer would append
+        // its own COMMIT under the same id and retroactively bless the
+        // orphan payload on the next replay. "Durable data does not imply
+        // a durable counter."
+        var max_seen_txn: u64 = 0;
+
         while (true) {
             const rec_opt = reader.next() catch |err| switch (err) {
                 error.Incomplete,
@@ -625,6 +633,7 @@ pub const Engine = struct {
                 else => return err,
             };
             const rec = rec_opt orelse break;
+            if (rec.txn_id > max_seen_txn) max_seen_txn = rec.txn_id;
             total_payload_bytes += @as(u64, rec.payload.len);
             if (total_payload_bytes > limits.MAX_WAL_REPLAY_AGGREGATE_BYTES) {
                 // `rec` is not yet appended to `all`, so it would otherwise
@@ -634,6 +643,13 @@ pub const Engine = struct {
                 return error.WalTooLarge;
             }
             try all.append(self.allocator, rec);
+        }
+
+        // Heal the txn-id allocator past everything the tail contains —
+        // including uncommitted residue (GSP-3). Replay runs single-threaded
+        // inside init, so plain load+store is safe; atomics for consistency.
+        if (max_seen_txn >= self.next_txn_id.load(.monotonic)) {
+            self.next_txn_id.store(max_seen_txn + 1, .monotonic);
         }
 
         // Second pass: build the set of committed txn_ids.
@@ -663,12 +679,6 @@ pub const Engine = struct {
         for (all.items) |r| {
             if (r.txn_id <= self.current_manifest.last_checkpoint_lsn) continue;
             if (!committed.contains(r.txn_id)) continue;
-            // Replay runs single-threaded inside init, so a plain
-            // load+store is safe; use atomic accessors for consistency
-            // with the rest of the engine (Phase B1).
-            if (r.txn_id >= self.next_txn_id.load(.monotonic)) {
-                self.next_txn_id.store(r.txn_id + 1, .monotonic);
-            }
             switch (r.record_type) {
                 .index_doc => try self.applyIndexDocPayload(r.doc_id, r.payload, &pos_buf),
                 .delete_doc => try self.memtable.addTombstone(r.doc_id),

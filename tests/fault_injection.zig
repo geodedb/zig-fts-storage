@@ -191,3 +191,79 @@ test "fault: writes after torn-tail recovery survive the next reopen (GSP-2)" {
         try std.testing.expect((try it_b.next()) != null);
     }
 }
+
+test "fault: uncommitted orphan txn is never resurrected by txn-id reuse (GSP-3)" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // Session 1: commit doc 1 as txn 1.
+    {
+        var eng = try fts.Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        const t = fts.TermPosting{ .term = "real", .positions = &[_]u32{1} };
+        try eng.indexDocument(1, &[_]fts.TermPosting{t});
+    }
+
+    // Crash simulation: append an ORPHAN bracket (BEGIN + INDEX_DOC, no
+    // COMMIT) as txn 2 — exactly what a crash between payload append and
+    // COMMIT append leaves behind.
+    {
+        var wal_dir = try tmp_dir.dir.openDir(io, "wal", .{});
+        defer wal_dir.close(io);
+        const f = try wal_dir.createFile(io, "fts.wal", .{ .truncate = false });
+        defer f.close(io);
+        var writer = try fts.wal.WalWriter.init(io, f, alloc);
+        defer writer.deinit();
+
+        // index_doc payload: u16 term_len | term | u16 num_pos | varint pos.
+        var payload: std.ArrayListUnmanaged(u8) = .empty;
+        defer payload.deinit(alloc);
+        const term = "ghost";
+        var num: [2]u8 = undefined;
+        std.mem.writeInt(u16, &num, @intCast(term.len), .little);
+        try payload.appendSlice(alloc, &num);
+        try payload.appendSlice(alloc, term);
+        std.mem.writeInt(u16, &num, 1, .little);
+        try payload.appendSlice(alloc, &num);
+        var vbuf: [10]u8 = undefined;
+        const w = try fts.utils.writeVarInt(&vbuf, 1);
+        try payload.appendSlice(alloc, vbuf[0..w]);
+
+        try writer.append(.{ .record_type = .begin, .txn_id = 2 });
+        try writer.append(.{ .record_type = .index_doc, .txn_id = 2, .doc_id = 999, .payload = payload.items });
+        try writer.sync();
+    }
+
+    // Session 2: orphan correctly dropped; then a new write. Pre-fix the
+    // engine reuses txn 2 for it and appends COMMIT(2) to the same WAL.
+    {
+        var eng = try fts.Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        // Scope the iterator so its shared lock is released before the
+        // write below — TermIterator holds the engine rw-lock shared for
+        // its whole lifetime, and indexDocument needs it exclusive.
+        {
+            var it_g = try fts.TermIterator.init(alloc, eng, "ghost");
+            defer it_g.deinit();
+            try std.testing.expect((try it_g.next()) == null);
+        }
+
+        const t = fts.TermPosting{ .term = "fresh", .positions = &[_]u32{1} };
+        try eng.indexDocument(3, &[_]fts.TermPosting{t});
+    }
+
+    // Session 3: the ghost must STILL be invisible. Pre-fix, COMMIT(2) from
+    // session 2 blesses the orphan INDEX_DOC(txn 2) and doc 999 resurrects.
+    {
+        var eng = try fts.Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        var it_g = try fts.TermIterator.init(alloc, eng, "ghost");
+        defer it_g.deinit();
+        try std.testing.expect((try it_g.next()) == null);
+        var it_f = try fts.TermIterator.init(alloc, eng, "fresh");
+        defer it_f.deinit();
+        try std.testing.expect((try it_f.next()) != null);
+    }
+}
