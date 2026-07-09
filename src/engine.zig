@@ -600,6 +600,13 @@ pub const Engine = struct {
                 error.Incomplete,
                 error.EndOfStream,
                 error.ChecksumMismatch,
+                // A corrupt payload_len means the record's extent cannot be
+                // trusted (we don't know how many bytes to skip to reach the
+                // next record), so treat it as a torn tail like the other
+                // arms here — `consumed` stays at the last good record so
+                // truncation preserves nothing bogus — rather than skipping
+                // it like the InvalidData (unknown record type) arm below.
+                error.PayloadTooLarge,
                 => break,
                 error.InvalidData => continue,
                 else => return err,

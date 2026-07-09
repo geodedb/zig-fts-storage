@@ -239,7 +239,12 @@ pub const WalReader = struct {
     /// and optional HMAC — so an unknown (future) record type leaves the
     /// stream aligned on the next record and counted in `consumed`. Callers
     /// that skip `error.InvalidData` therefore resume at a record boundary
-    /// instead of desyncing mid-record.
+    /// instead of desyncing mid-record. Every `error.InvalidData` path (an
+    /// unknown type, or an HMAC-backend failure on an otherwise CRC-valid
+    /// record) shares this guarantee. `error.PayloadTooLarge` does NOT: an
+    /// oversized `payload_len` means the record's extent is untrusted before
+    /// its payload is ever read, so it is treated as a torn tail — `consumed`
+    /// is left at the last good record, not advanced past this one.
     pub fn next(self: *WalReader) !?WalRecord {
         var header_buf: [1 + 8 + 8 + 4]u8 = undefined;
         var header_iov = [_][]u8{&header_buf};
@@ -255,7 +260,14 @@ pub const WalReader = struct {
         const doc_id = utils.readU64Le(&header_buf, &pos);
         const payload_len = utils.readU32Le(&header_buf, &pos);
 
-        if (payload_len > limits.MAX_WAL_PAYLOAD_BYTES) return error.InvalidData;
+        // A payload_len this large means the record's extent cannot be
+        // trusted — we have no way to know how many bytes to skip to reach
+        // the next record boundary. Unlike an unknown record type (which is
+        // CRC/HMAC-validated before we ever see it), this fires before the
+        // payload is even read, so it must terminate replay like a torn
+        // tail rather than being skipped (GSP-1: only length-trusted extents
+        // may be skipped).
+        if (payload_len > limits.MAX_WAL_PAYLOAD_BYTES) return error.PayloadTooLarge;
 
         const payload_and_crc = try self.allocator.alloc(u8, payload_len + 4);
         defer self.allocator.free(payload_and_crc);
@@ -280,6 +292,8 @@ pub const WalReader = struct {
         var record_bytes: u64 = header_buf.len + @as(u64, payload_len) + 4;
 
         // Optional HMAC-SHA256 envelope (SEC-02, SEC-EXT-0401, GAP-0027).
+        // The tag is computed over (header || payload || crc) at write time,
+        // so we re-compute over the same bytes here.
         if (self.hmac_key) |key| {
             // fips-exempt: compile-time tag length only (HMAC goes through the seam).
             const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
@@ -288,13 +302,27 @@ pub const WalReader = struct {
             const read_tag = try self.file.readStreaming(self.io, &tag_iov);
             if (read_tag < Hmac.mac_length) return error.Incomplete;
 
+            // FIPS-0004: integrity HMAC-SHA256 via the seam. The one-shot seam
+            // requires a contiguous message, so we re-assemble the exact bytes
+            // tagged at write time (header || payload || crc) into a scratch
+            // buffer — byte-identical to the previous incremental computation.
             const msg = try self.allocator.alloc(u8, header_buf.len + payload_and_crc.len);
             defer self.allocator.free(msg);
             @memcpy(msg[0..header_buf.len], &header_buf);
             @memcpy(msg[header_buf.len..], payload_and_crc);
 
             var computed_tag: [Hmac.mac_length]u8 = undefined;
-            _ = backend.Mac.hmac(.sha256, key, msg, &computed_tag) catch return error.InvalidData;
+            _ = backend.Mac.hmac(.sha256, key, msg, &computed_tag) catch {
+                // The full record (header + payload + crc + tag) was already
+                // read from the stream and is CRC-valid — only the HMAC
+                // backend call itself failed. The stream is aligned on the
+                // next record, so these bytes must still count toward
+                // `consumed` (GSP-1): understating it here would make a
+                // later truncation-at-`consumed` chop valid, already-durable
+                // record bytes.
+                self.consumed += record_bytes + Hmac.mac_length;
+                return error.InvalidData;
+            };
 
             if (!std.mem.eql(u8, &stored_tag, &computed_tag)) return error.HmacMismatch;
             record_bytes += Hmac.mac_length;
@@ -497,4 +525,37 @@ test "WalReader.consumed tracks validated bytes and freezes at a torn tail (GSP-
     // Torn tail: error, and consumed does NOT advance past the last good record.
     try std.testing.expectError(error.Incomplete, reader.next());
     try std.testing.expectEqual(rec1_len + rec2_len, reader.consumed);
+}
+
+test "WalReader rejects oversized payload_len as a torn tail, not a skip (GSP-1)" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // Hand-craft a 21-byte header whose payload_len exceeds the cap. The
+    // record's true extent cannot be trusted (we don't know how many bytes
+    // to skip to reach the next record), so this must NOT be treated like
+    // the unknown-record-type forward-compat skip: it has to terminate
+    // replay as a torn tail, with `consumed` left at 0.
+    {
+        const file = try tmp_dir.dir.createFile(io, "wal_oversized.bin", .{});
+        defer file.close(io);
+
+        var header_buf: [1 + 8 + 8 + 4]u8 = undefined;
+        header_buf[0] = 3; // index_doc
+        std.mem.writeInt(u64, header_buf[1..9], 42, .little); // txn_id
+        std.mem.writeInt(u64, header_buf[9..17], 7, .little); // doc_id
+        std.mem.writeInt(u32, header_buf[17..21], limits.MAX_WAL_PAYLOAD_BYTES + 1, .little);
+
+        try file.writePositionalAll(io, &header_buf, 0);
+        try file.sync(io);
+    }
+
+    const file = try tmp_dir.dir.openFile(io, "wal_oversized.bin", .{});
+    defer file.close(io);
+    var reader = WalReader.init(io, file, alloc);
+
+    try std.testing.expectError(error.PayloadTooLarge, reader.next());
+    try std.testing.expectEqual(@as(u64, 0), reader.consumed);
 }
