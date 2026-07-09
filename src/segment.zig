@@ -12,7 +12,7 @@ pub const Error = @import("errors.zig").SegmentError;
 /// crc32c(4, over magic..payload). Uniform across terms.hash, postings.bin,
 /// tombstones.bin, norms.bin; applied INSIDE the AEAD envelope when
 /// encryption is on. The magic's four bytes deliberately decode — as the
-/// u32 LE `count` field every legacy parser reads first — to ~843.6M, far
+/// u32 LE `count` field every legacy parser reads first — to ~843.5M, far
 /// above every MAX_*_PER_SEGMENT cap (2^24), so a pre-v2 binary that opens
 /// a v2 file fails loudly at its existing count guard instead of misparsing
 /// (graph-storage parity: cross-layout misroutes must trip existing guards).
@@ -781,6 +781,12 @@ pub const SegmentReader = struct {
 
         const payload_len = plain.len - 12;
         std.mem.copyForwards(u8, plain[0..payload_len], plain[8 .. 8 + payload_len]);
+        // OWNERSHIP HAZARD: on the plaintext path `plain == raw` and the
+        // `raw_owned` errdefer above is still armed — it is the sole owner
+        // until this expression completes (the dupe-OOM `try` inside the
+        // catch relies on it). A successful realloc may free-and-move that
+        // memory, so NOTHING fallible may be inserted between the realloc
+        // and the return, or the stale errdefer double-frees.
         const shrunk = self.allocator.realloc(plain, payload_len) catch blk: {
             const copy = try self.allocator.dupe(u8, plain[0..payload_len]);
             self.allocator.free(plain);

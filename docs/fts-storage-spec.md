@@ -198,7 +198,7 @@ magic(4)="FSG2" | version(4, u32 LE = 2) | payload | crc32c(4, over magic..paylo
   is what lands on disk.
 - **Downgrade-safe by construction:** the magic's four bytes (`'F','S','G','2'`)
   deliberately decode, as the little-endian `u32` `count` field every legacy
-  parser reads first, to `0x32475346` = 843,600,710 — far above every
+  parser reads first, to `0x32475346` = 843,535,174 — far above every
   `MAX_*_PER_SEGMENT` cap (2^24). An old (pre-v2) binary that opens a v2
   `terms.hash` therefore fails loudly at its existing count guard
   (`error.TermCountTooLarge`) instead of misparsing the file as valid data.
