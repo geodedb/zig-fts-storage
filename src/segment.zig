@@ -710,6 +710,23 @@ pub const SegmentReader = struct {
         // parser since `readSegmentFile` returns the same bytes that used
         // to be streamed.
 
+        // GSP-5: materialize the AEAD postings buffer FIRST so its length
+        // can bound-check every dictionary (offset, len) pair below. The
+        // plaintext path uses the cached handle's stat. (AEAD ciphertext is
+        // not random-accessible — tag covers the whole stream — so this
+        // buffer was always loaded eagerly; only its position in load()
+        // moved.)
+        if (self.aead_key != null) {
+            self.postings_data = (try self.readSegmentFile("postings.bin")) orelse
+                try self.allocator.alloc(u8, 0);
+        }
+        const postings_size: u64 = if (self.postings_data) |pd|
+            pd.len
+        else blk: {
+            const st = try self.postings_file.stat(self.io);
+            break :blk st.size;
+        };
+
         // Load dictionary. PERF-0017: keys are interned into a single
         // per-segment arena instead of N individual `dupe` allocations.
         // Two-pass over dict_buf — first to compute total term bytes so the
@@ -769,6 +786,18 @@ pub const SegmentReader = struct {
                 const offset = utils.readU64Le(dict_buf, &pos);
                 const len = utils.readU64Le(dict_buf, &pos);
 
+                // GSP-5 (graph-storage parity): validate disk-derived extents
+                // at load, symmetrically for plaintext and AEAD paths. A
+                // wrong-but-in-range offset can still decode garbage until
+                // the v2 envelope (GSP-9) adds whole-file CRC — but out-of-
+                // range and absurd entries fail loud at open, not at query.
+                if (len > limits.MAX_POSTINGS_BYTES) return error.PostingsTooLarge;
+                const end = std.math.add(u64, offset, len) catch return error.InvalidData;
+                if (end > postings_size) return error.InvalidData;
+                // Every posting occupies at least one byte, so df can never
+                // exceed the byte length of its postings run.
+                if (df > len) return error.InvalidData;
+
                 self.dictionary.putAssumeCapacityNoClobber(key_slice, .{
                     .df = df,
                     .postings_offset = offset,
@@ -811,15 +840,6 @@ pub const SegmentReader = struct {
                 const length = utils.readU32Le(norms_buf, &pos);
                 self.norms.putAssumeCapacityNoClobber(doc_id, length);
             }
-        }
-
-        // When AEAD is enabled, the postings_file handle cannot be used for
-        // positional reads — the GCM tag covers the entire file so the
-        // ciphertext is not random-accessible. Pre-load and decrypt the
-        // whole file once at init; search() will read from this buffer.
-        if (self.aead_key != null) {
-            self.postings_data = (try self.readSegmentFile("postings.bin")) orelse
-                try self.allocator.alloc(u8, 0);
         }
     }
 };
@@ -959,4 +979,49 @@ test "nextDocOnly rejects doc-id delta overflow (GSP-4)" {
     defer it.pos_buf.deinit(alloc);
     _ = try it.nextDocOnly();
     try std.testing.expectError(error.InvalidData, it.nextDocOnly());
+}
+
+test "SegmentReader.load rejects dictionary entries pointing outside postings.bin (GSP-5)" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    try tmp_dir.dir.createDir(io, "seg_1", .default_dir);
+    var seg_dir = try tmp_dir.dir.openDir(io, "seg_1", .{});
+    defer seg_dir.close(io);
+
+    // terms.hash claiming (offset=0, len=1 GiB) against an 8-byte postings.bin.
+    var dict: std.ArrayListUnmanaged(u8) = .empty;
+    defer dict.deinit(alloc);
+    var num: [8]u8 = undefined;
+    std.mem.writeInt(u32, num[0..4], 1, .little); // count = 1
+    try dict.appendSlice(alloc, num[0..4]);
+    std.mem.writeInt(u16, num[0..2], 1, .little); // term_len = 1
+    try dict.appendSlice(alloc, num[0..2]);
+    try dict.append(alloc, 't');
+    std.mem.writeInt(u64, num[0..8], 1, .little); // df
+    try dict.appendSlice(alloc, num[0..8]);
+    std.mem.writeInt(u64, num[0..8], 0, .little); // postings_offset
+    try dict.appendSlice(alloc, num[0..8]);
+    std.mem.writeInt(u64, num[0..8], 1 << 30, .little); // postings_len — hostile
+    try dict.appendSlice(alloc, num[0..8]);
+
+    {
+        const f = try seg_dir.createFile(io, "terms.hash", .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, dict.items);
+    }
+    {
+        const f = try seg_dir.createFile(io, "postings.bin", .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, &[_]u8{0} ** 8);
+    }
+
+    // Pre-fix: init succeeds and the bad entry waits to poison a query.
+    // Post-fix: load rejects at open.
+    try std.testing.expectError(
+        error.InvalidData,
+        SegmentReader.init(io, alloc, tmp_dir.dir, 1),
+    );
 }
