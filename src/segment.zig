@@ -588,10 +588,16 @@ pub const SegmentReader = struct {
             while (i < tf) : (i += 1) {
                 const pos_delta = try utils.readVarInt(self.data[self.pos..]);
                 self.pos += pos_delta.bytes_read;
-                const delta32 = std.math.cast(u32, pos_delta.val) orelse
+                // GSP-4, single-branch form: delta must fit in the remaining
+                // u32 headroom. One compare replaces the previous
+                // cast-then-checked-add pair (two branches) — same guarantee
+                // (never panics, never wraps, in every build mode), measured
+                // ~half the checked-decode overhead on the posting_iter
+                // microbenches. `maxInt(u32) - last_pos` cannot underflow and
+                // the subsequent add cannot overflow by construction.
+                if (pos_delta.val > std.math.maxInt(u32) - last_pos)
                     return error.PositionOutOfRange;
-                last_pos = std.math.add(u32, last_pos, delta32) catch
-                    return error.PositionOutOfRange;
+                last_pos += @intCast(pos_delta.val);
                 self.pos_buf.appendAssumeCapacity(last_pos);
             }
 
