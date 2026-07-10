@@ -253,7 +253,7 @@ zig-test-windows-stress-0.16.0:
   # from devnw/zig/fips — it fetches/verifies OpenSSL via wget and installs
   # via sudo; kept unpatched to stay byte-identical with upstream, and sudo
   # as root in the container is a no-op wrapper).
-  - apt-get install -y --no-install-recommends curl wget sudo ca-certificates xz-utils git build-essential python3 perl
+  - apt-get install -y --no-install-recommends curl wget sudo gnupg ca-certificates xz-utils git build-essential python3 perl
   - bash scripts/install-zig.sh "$ZIG_VERSION"
   - export PATH="$(pwd)/zig-${ZIG_VERSION}:$PATH"
   - zig version
@@ -340,7 +340,13 @@ fips-deps:
     # GitLab artifacts must live under $CI_PROJECT_DIR — /usr/local/ssl is
     # outside the project dir and cannot be uploaded, so build into a
     # project-relative prefix instead (still handed to test-fips below).
-    - OPENSSL_PREFIX="$CI_PROJECT_DIR/.openssl-fips" make deps
+    # OPENSSL_VERSION pinned: the script's "latest 3.x" resolver greps
+    # releases/latest for an openssl-3.* tag, but the latest release is now
+    # the 4.x line, so the grep silently falls back to the system OpenSSL
+    # (3.0.13 — no ML-KEM, fails verify-fips-provider.sh). Bump this pin
+    # alongside OpenSSL 3.x LTS releases. Same latent bug flagged upstream
+    # in devnw/zig/fips' copy of the resolver.
+    - OPENSSL_PREFIX="$CI_PROJECT_DIR/.openssl-fips" OPENSSL_VERSION="3.6.3" make deps
   artifacts:
     paths:
       - .openssl-fips/
