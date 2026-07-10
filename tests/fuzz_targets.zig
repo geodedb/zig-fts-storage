@@ -288,7 +288,9 @@ test "fuzz: SegmentReader.init does not panic on adversarial segment files" {
 //   - count = maxInt(u32)                 -> Tombstone/NormCountTooLarge
 //     (legacy) / no magic -> InvalidData (enveloped, since len < 12)
 //   - count = 3, only one full entry present -> per-entry Incomplete
-//     (legacy) / no magic -> InvalidData (enveloped, since len < 12)
+//     (legacy) / no magic -> InvalidData (enveloped; the file is exactly 12
+//     bytes, but its leading bytes are the count/payload, not the FSG2
+//     magic, so has_magic is false)
 //   - v2 magic + version 2 + garbage payload + wrong CRC (24 bytes) ->
 //     parsed as naked legacy bytes when terms.hash is legacy (the leading
 //     magic bytes just become a huge bogus count, which still must not
