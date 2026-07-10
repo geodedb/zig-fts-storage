@@ -15,17 +15,19 @@ const std = @import("std");
 pub const policy = @import("policy.zig");
 
 fn randomBytes(out: []u8) void {
-    // Linux getrandom syscall; the non-fips shim's CSPRNG.
-    var off: usize = 0;
-    while (off < out.len) {
-        const rc = std.os.linux.getrandom(out.ptr + off, out.len - off, 0);
-        const n: isize = @bitCast(rc);
-        if (n < 0) {
-            // EINTR/EAGAIN: retry; anything else: fall back to a re-seed.
-            continue;
-        }
-        off += @intCast(n);
-    }
+    // Portable CSPRNG via std.Io (Zig 0.16 removed std.crypto.random): the
+    // global Threaded instance's `random` is documented as a threadsafe
+    // cryptographically-secure generator seeded from the platform entropy
+    // source (getrandom on Linux, getentropy on macOS/BSD, ProcessPrng on
+    // Windows). The previous implementation issued the raw LINUX getrandom
+    // syscall unconditionally, which raises SIGSYS on macOS (invalid
+    // syscall trap) and would equally break Windows — first observed as
+    // 'terminated with signal SYS' in the macOS CI integration job.
+    // NOTE: this diverges from the canonical seam copy in devnw/zig/fips
+    // (commit 1073e4a lineage); the same fix belongs upstream in fips'
+    // std_shim.zig and graph-storage's copy.
+    const io = std.Io.Threaded.global_single_threaded.io();
+    io.random(out);
 }
 
 pub const Hash = struct {
