@@ -332,10 +332,13 @@ fips-deps:
   extends: .zig-host-base
   stage: build
   script:
-    - make deps   # builds latest OpenSSL + FIPS provider into /usr/local/ssl
+    # GitLab artifacts must live under $CI_PROJECT_DIR — /usr/local/ssl is
+    # outside the project dir and cannot be uploaded, so build into a
+    # project-relative prefix instead (still handed to test-fips below).
+    - OPENSSL_PREFIX="$CI_PROJECT_DIR/.openssl-fips" make deps
   artifacts:
     paths:
-      - /usr/local/ssl
+      - .openssl-fips/
     expire_in: 1 day
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
@@ -345,7 +348,7 @@ test-fips:
   extends: .zig-host-base
   stage: test
   script:
-    - OPENSSL_CONF=/usr/local/ssl/ssl/openssl.cnf zig build test -Dfips=true -Dopenssl_path=/usr/local/ssl --summary all
+    - OPENSSL_CONF="$CI_PROJECT_DIR/.openssl-fips/ssl/openssl.cnf" zig build test -Dfips=true -Dopenssl_path="$CI_PROJECT_DIR/.openssl-fips" --summary all
   needs:
     - fips-deps
   rules:

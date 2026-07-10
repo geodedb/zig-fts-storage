@@ -136,7 +136,13 @@ help:
 	@echo "  clean                Remove build artifacts"
 	@echo "  help                 Show this help message"
 
-.PHONY: test-fips test-dual
+.PHONY: deps test-fips test-dual
+# Build + install the latest OpenSSL 3.x with the FIPS provider into
+# $(OPENSSL_PREFIX) (default /usr/local/ssl). Required before test-dual /
+# the CI test-fips job. Idempotent; re-runs upgrade in place.
+deps:
+	OPENSSL_PREFIX=$(or $(OPENSSL_PREFIX),/usr/local/ssl) ./scripts/install-openssl-fips.sh
+
 # FIPS-140-3 dual-mode test (-Dfips=true). Requires the OpenSSL FIPS
 # provider at $(or $(OPENSSL_PREFIX),/usr/local/ssl) (run `make deps` first).
 test-fips:
