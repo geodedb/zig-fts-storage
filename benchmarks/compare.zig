@@ -3,13 +3,20 @@
 
 //! Compare two benchmark result files emitted by `framework.runScenarios`.
 //!
-//! Matches rows by `scenario_name` and reports percent change for
-//! `throughput_ops_per_sec` and `wall_ns_p50`. A regression is any
+//! Matches rows by `scenario_name` AND `cpu` and reports percent change
+//! for `throughput_ops_per_sec` and `wall_ns_p50`. A regression is any
 //! throughput drop that exceeds the noise gate, computed as
 //! `max(absolute_floor_pct, 3 * stddev_pct_in_baseline)`. The default
 //! floor (15%) is intentionally loose so first-time wiring does not
 //! flag noise; tighten via `--floor <pct>` once the baseline is
 //! stable.
+//!
+//! The `cpu` half of the match key exists because the CI runner fleet is
+//! heterogeneous: identical code measured -56%/+82% run-to-run purely by
+//! landing on a different box (znver4 vs broadwell), swamping any real
+//! regression. The committed baseline carries one row set per machine
+//! class; a run on a cpu with no baseline rows skips (same posture as a
+//! missing scenario) until that class's rows are added.
 //!
 //! Exits non-zero on any regression.
 //!
@@ -65,10 +72,12 @@ pub fn main(init: std.process.Init) !void {
 
     var failures: usize = 0;
     var matched: usize = 0;
+    var skipped: usize = 0;
     for (current_doc.value.rows) |row| {
-        const baseline = findMatch(baseline_doc.value.rows, row.scenario_name) orelse {
+        const baseline = findMatch(baseline_doc.value.rows, row.scenario_name, row.cpu) orelse {
+            skipped += 1;
             if (!quiet) {
-                try stderr.print("  {s}: no baseline row, skipping\n", .{row.scenario_name});
+                try stderr.print("  {s}: no baseline row for cpu '{s}', skipping\n", .{ row.scenario_name, row.cpu });
                 try stderr.flush();
             }
             continue;
@@ -105,6 +114,15 @@ pub fn main(init: std.process.Init) !void {
     try stderr.flush();
 
     if (matched == 0) {
+        // Rows existed but every one skipped on the cpu key: this machine
+        // class has no baseline yet. Skip the gate loudly rather than fail —
+        // the fix is to append this run's rows to baseline.json, and failing
+        // here would just block CI on every newly-added runner class.
+        if (skipped != 0) {
+            try stderr.writeAll("gate skipped: no baseline rows for this machine class — append this run's rows to benchmarks/results/baseline.json to arm it\n");
+            try stderr.flush();
+            return;
+        }
         try stderr.writeAll("no scenarios matched between baseline and current\n");
         try stderr.flush();
         return error.NoMatches;
@@ -139,9 +157,9 @@ fn readDocument(
     );
 }
 
-fn findMatch(rows: []const framework.ResultRow, name: []const u8) ?framework.ResultRow {
+fn findMatch(rows: []const framework.ResultRow, name: []const u8, cpu: []const u8) ?framework.ResultRow {
     for (rows) |row| {
-        if (std.mem.eql(u8, row.scenario_name, name)) return row;
+        if (std.mem.eql(u8, row.scenario_name, name) and std.mem.eql(u8, row.cpu, cpu)) return row;
     }
     return null;
 }
