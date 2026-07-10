@@ -249,10 +249,11 @@ zig-test-windows-stress-0.16.0:
   interruptible: true
   before_script:
   - apt-get update -qq
-  # wget: required by scripts/install-openssl-fips.sh (canonical copy from
-  # devnw/zig/fips — it fetches/verifies OpenSSL via wget; kept unpatched to
-  # stay byte-identical with upstream).
-  - apt-get install -y --no-install-recommends curl wget ca-certificates xz-utils git build-essential python3 perl
+  # wget + sudo: required by scripts/install-openssl-fips.sh (canonical copy
+  # from devnw/zig/fips — it fetches/verifies OpenSSL via wget and installs
+  # via sudo; kept unpatched to stay byte-identical with upstream, and sudo
+  # as root in the container is a no-op wrapper).
+  - apt-get install -y --no-install-recommends curl wget sudo ca-certificates xz-utils git build-essential python3 perl
   - bash scripts/install-zig.sh "$ZIG_VERSION"
   - export PATH="$(pwd)/zig-${ZIG_VERSION}:$PATH"
   - zig version
