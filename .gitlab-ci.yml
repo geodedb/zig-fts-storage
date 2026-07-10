@@ -288,6 +288,14 @@ benchmark-regression:
   extends: .zig-host-base
   stage: performance
   rules: *bench-rules
+  # Advisory (the posture the header comment above always prescribed):
+  # measured cross-run variance on the shared runners is ±45% for identical
+  # code within one cpu class (2026-07-10, pipelines 2668163641 vs
+  # 2668230536: engine_init_cycle +45% while posting_iter -34%, same sha,
+  # stddev_pct 2-4%) — noisy neighbors swamp any real regression. The
+  # cpu-aware compare gate still prints per-scenario deltas for humans;
+  # promote back to blocking only on a dedicated, isolated bench runner.
+  allow_failure: true
   script:
   - mkdir -p benchmarks/results
   - zig build bench -- --output benchmarks/results/ci-current.json
