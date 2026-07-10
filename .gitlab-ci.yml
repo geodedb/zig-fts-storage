@@ -34,6 +34,7 @@ default:
   interruptible: true
   tags:
   - company
+  - linux
 
 include:
   # SEC-08 / SEC-EXT-0503: catalog components currently pinned to mutable semver
