@@ -10,19 +10,24 @@ const crypto_backend = @import("crypto_backend");
 /// is a zero-sized enum (Windows/WASI). Used by `Engine` to set 0o700 on
 /// data subdirectories and 0o600 on sensitive files (SEC-09, SEC-EXT-0302).
 pub fn fileMode(mode: u32) std.Io.File.Permissions {
-    if (@typeInfo(std.posix.mode_t) == .int) {
-        return std.Io.File.Permissions.fromMode(@intCast(mode));
-    }
-    return .default_file;
+    const P = std.Io.File.Permissions;
+    // Windows/WASI variants of Permissions carry no POSIX mode bits and no
+    // fromMode constructor — collapse to the platform default (the doc
+    // comment above has always promised this; the guard makes it compile).
+    // Note: `std.posix.mode_t` alone is not a reliable signal here — on
+    // Windows it resolves to `u32` (an `.int`) even though `Permissions` is
+    // the zero-sized DWORD-backed enum with no `fromMode`, since
+    // `Permissions` special-cases `is_windows` ahead of the mode_t check.
+    if (comptime !@hasDecl(P, "fromMode")) return .default_file;
+    return P.fromMode(@intCast(mode));
 }
 
 /// Variant of `fileMode` for directory creation. Falls back to
 /// `.default_dir` on platforms whose `Permissions` is zero-sized.
 pub fn dirMode(mode: u32) std.Io.Dir.Permissions {
-    if (@typeInfo(std.posix.mode_t) == .int) {
-        return std.Io.Dir.Permissions.fromMode(@intCast(mode));
-    }
-    return .default_dir;
+    const P = std.Io.Dir.Permissions;
+    if (comptime !@hasDecl(P, "fromMode")) return .default_dir;
+    return P.fromMode(@intCast(mode));
 }
 
 // ============================================================================
