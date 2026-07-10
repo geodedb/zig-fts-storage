@@ -366,3 +366,22 @@ test "FIPS-0004b: aeadEncrypt/aeadDecrypt round-trips and rejects a flipped tag 
     blob[AEAD_NONCE_LEN] ^= 0x01;
     try std.testing.expectError(error.AuthenticationFailed, aeadDecrypt(&key, blob, a));
 }
+
+// SEC-EXT-0504: coverage-guided fuzz entry point for the `zig-fuzz` CI
+// component (`zig build test --fuzz`). Complements the deterministic
+// adversarial corpus in tests/fuzz_targets.zig — that file is a separate
+// build step (`test-fuzz`) not compiled into `zig build test`, so the
+// coverage-guided fuzzer needs its own entry point living inside the `test`
+// step. Outside `--fuzz` mode this runs once against an empty smoke input
+// (see `std.testing.fuzz`'s no-corpus fallback), so it also runs as a
+// normal, fast unit test.
+test "fuzz: readVarInt never panics on arbitrary bytes" {
+    const Ctx = struct {
+        fn testOne(_: @This(), smith: *std.testing.Smith) anyerror!void {
+            var buf: [32]u8 = undefined;
+            const len = smith.slice(&buf);
+            _ = readVarInt(buf[0..len]) catch return;
+        }
+    };
+    try std.testing.fuzz(Ctx{}, Ctx.testOne, .{});
+}

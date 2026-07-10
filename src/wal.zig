@@ -408,6 +408,25 @@ test "wal corrupt data detected (bad CRC)" {
     const result = WalRecord.deserialize(alloc, data);
     try std.testing.expectError(error.ChecksumMismatch, result);
 }
+
+// SEC-EXT-0504: coverage-guided fuzz entry point for the `zig-fuzz` CI
+// component (`zig build test --fuzz`). See the equivalent test in
+// src/utils.zig for why this lives alongside the deterministic corpus in
+// tests/fuzz_targets.zig rather than replacing it.
+test "fuzz: WalRecord.deserialize never panics or leaks on arbitrary bytes" {
+    const Ctx = struct {
+        fn testOne(_: @This(), smith: *std.testing.Smith) anyerror!void {
+            var buf: [256]u8 = undefined;
+            const len = smith.slice(&buf);
+            if (WalRecord.deserialize(std.testing.allocator, buf[0..len])) |res| {
+                var r = res.rec;
+                r.deinit(std.testing.allocator);
+            } else |_| {}
+        }
+    };
+    try std.testing.fuzz(Ctx{}, Ctx.testOne, .{});
+}
+
 test "WalReader reads records sequentially" {
     const alloc = std.testing.allocator;
     var tmp_dir = std.testing.tmpDir(.{});
