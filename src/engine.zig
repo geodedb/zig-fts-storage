@@ -277,7 +277,28 @@ pub const Engine = struct {
         // wrong-key manifest must not be silently masked by falling back to
         // the other slot (SEC-02, SEC-EXT-0401, GAP-0027). The A/B fallback
         // is explicitly designed to recover from bit rot, not tampering.
-        if (res_a == .hmac_mismatch or res_b == .hmac_mismatch) return error.HmacMismatch;
+        //
+        // Both fail-loud branches below may be reached while the OTHER slot
+        // parsed successfully (`.ok`) — e.g. one healthy manifest next to one
+        // tampered/future-version one. That surviving `.ok` Manifest owns a
+        // heap-allocated segments list that nothing else will ever free once
+        // we return early here, so it must be torn down explicitly first
+        // (freeManifestResultIfOk) rather than silently leaked.
+        if (res_a == .hmac_mismatch or res_b == .hmac_mismatch) {
+            freeManifestResultIfOk(allocator, res_a);
+            freeManifestResultIfOk(allocator, res_b);
+            return error.HmacMismatch;
+        }
+
+        // GSP-6: a format_version this binary does not implement is a
+        // deployment condition (upgrade/downgrade mismatch), not corruption.
+        // It must never be masked by the A/B corrupt-slot fallback — fail
+        // loud on either slot, just like HmacMismatch above.
+        if (res_a == .unsupported_version or res_b == .unsupported_version) {
+            freeManifestResultIfOk(allocator, res_a);
+            freeManifestResultIfOk(allocator, res_b);
+            return error.UnsupportedManifestVersion;
+        }
 
         if (res_a == .corrupt and res_b == .corrupt) return error.ManifestCorrupt;
 
@@ -339,7 +360,16 @@ pub const Engine = struct {
                 // HMAC mismatch must NEVER be quarantined — wrong-key /
                 // tampering has to surface, not be silently walked past
                 // (SEC-02, SEC-EXT-0401, GAP-0027).
-                if (err == error.HmacMismatch) return err;
+                //
+                // Same for UnsupportedSegmentVersion: like the manifest's
+                // format_version gate (errors.zig calls this "a deployment
+                // condition, not corruption"), a segment envelope written by
+                // a newer binary generation must surface loudly, not be
+                // renamed to `seg_<id>.corrupt`. Quarantining it would let
+                // the next flush silently rewrite the manifest without that
+                // segment's entry — permanently destroying the only path
+                // back to a compatible (older) binary, i.e. a downgrade.
+                if (err == error.HmacMismatch or err == error.UnsupportedSegmentVersion) return err;
 
                 // Without AEAD configured, refuse to quarantine: the load
                 // failure is more likely a "you forgot to pass aead_key"
@@ -382,8 +412,9 @@ pub const Engine = struct {
 
         engine.next_txn_id.store(engine.current_manifest.last_checkpoint_lsn + 1, .monotonic);
 
-        // Replay WAL
-        try engine.replayWal();
+        // Replay WAL. The returned offset is the end of the last valid
+        // record; anything beyond it is a torn tail from the crash.
+        const wal_valid_bytes = try engine.replayWal();
 
         // Build the engine-wide aggregated tombstone set so isDeleted is O(1)
         // (PERF-0006, WRK-031). Walk every segment's tombstones plus the
@@ -420,6 +451,15 @@ pub const Engine = struct {
             .permissions = utils.fileMode(0o600),
         });
         errdefer engine.wal_file.close(io);
+        // GSP-2: chop the torn tail BEFORE the writer computes its append
+        // offset. Without this, post-recovery appends land after garbage
+        // that replay breaks on — fsync-acknowledged yet unreachable. The
+        // truncation is fsynced so a second crash cannot resurrect the tail.
+        const wal_stat = try engine.wal_file.stat(io);
+        if (wal_stat.size > wal_valid_bytes) {
+            try engine.wal_file.setLength(io, wal_valid_bytes);
+            try engine.wal_file.sync(io);
+        }
         engine.wal_writer = try wal.WalWriter.initWithHmac(
             io,
             engine.wal_file,
@@ -493,8 +533,12 @@ pub const Engine = struct {
         const size_usize = std.math.cast(usize, stat.size) orelse return error.ManifestTooLarge;
         const data = try allocator.alloc(u8, size_usize);
         defer allocator.free(data);
-        var iov = [_][]u8{data};
-        _ = try file.readStreaming(io, &iov);
+        var index: usize = 0;
+        while (index < size_usize) {
+            const amt = try file.readPositional(io, &.{data[index..]}, index);
+            if (amt == 0) return error.InvalidData; // file shrank under us
+            index += amt;
+        }
         return try manifest.Manifest.deserializeWithHmac(allocator, data, hmac_key);
     }
 
@@ -516,6 +560,9 @@ pub const Engine = struct {
         /// caller can fail loud rather than silently fall back to the other
         /// slot — wrong key / tampering must not be hidden.
         hmac_mismatch,
+        /// File parsed and CRC-validated but its format_version is not one
+        /// this binary implements. Fail-loud like hmac_mismatch (GSP-6).
+        unsupported_version,
     };
 
     /// Three-state result with a fourth out-of-band `hmac_mismatch`. HMAC
@@ -538,6 +585,7 @@ pub const Engine = struct {
             // Surface HMAC mismatch separately so a wrong key fails loud
             // instead of being indistinguishable from generic corruption.
             error.HmacMismatch => return .hmac_mismatch,
+            error.UnsupportedManifestVersion => return .unsupported_version,
             // Treat any parse / validation failure as "this slot is
             // unusable". The caller only fails closed when *both* slots
             // are unusable; one corrupt slot still allows recovery from
@@ -550,12 +598,28 @@ pub const Engine = struct {
         }
     }
 
-    fn replayWal(self: *Engine) !void {
+    /// Frees the `Manifest` owned by `result` if it parsed successfully
+    /// (`.ok`); a no-op for every other variant. Used by the fail-loud paths
+    /// in `initWithConfig` (HmacMismatch, UnsupportedManifestVersion) so a
+    /// healthy manifest slot sitting next to a bad one does not leak its
+    /// segments list when we return before `selectManifest` ever takes
+    /// ownership of it.
+    fn freeManifestResultIfOk(allocator: Allocator, result: ManifestLoadResult) void {
+        if (result == .ok) {
+            var m = result.ok;
+            m.deinit(allocator);
+        }
+    }
+
+    /// Returns the number of validated WAL bytes (the safe truncation point):
+    /// everything past it is a torn tail that future appends must overwrite,
+    /// or replay will never reach them (GSP-2).
+    fn replayWal(self: *Engine) !u64 {
         // SEC-EXT-0301: O_NOFOLLOW on the WAL — an attacker with write access
         // to the wal/ directory must not be able to redirect replay through a
         // symlink.
         const file = self.wal_dir.openFile(self.io, "fts.wal", .{ .follow_symlinks = false }) catch |err| {
-            if (err == error.FileNotFound) return;
+            if (err == error.FileNotFound) return 0;
             return err;
         };
         defer file.close(self.io);
@@ -595,16 +659,32 @@ pub const Engine = struct {
         // than an OOM.
         var total_payload_bytes: u64 = 0;
 
+        // GSP-3 (graph-storage parity): track the max txn id across ALL
+        // drained records — committed or not. An orphan (uncommitted)
+        // bracket's id must never be re-issued: a later writer would append
+        // its own COMMIT under the same id and retroactively bless the
+        // orphan payload on the next replay. "Durable data does not imply
+        // a durable counter."
+        var max_seen_txn: u64 = 0;
+
         while (true) {
             const rec_opt = reader.next() catch |err| switch (err) {
                 error.Incomplete,
                 error.EndOfStream,
                 error.ChecksumMismatch,
+                // A corrupt payload_len means the record's extent cannot be
+                // trusted (we don't know how many bytes to skip to reach the
+                // next record), so treat it as a torn tail like the other
+                // arms here — `consumed` stays at the last good record so
+                // truncation preserves nothing bogus — rather than skipping
+                // it like the InvalidData (unknown record type) arm below.
+                error.PayloadTooLarge,
                 => break,
                 error.InvalidData => continue,
                 else => return err,
             };
             const rec = rec_opt orelse break;
+            if (rec.txn_id > max_seen_txn) max_seen_txn = rec.txn_id;
             total_payload_bytes += @as(u64, rec.payload.len);
             if (total_payload_bytes > limits.MAX_WAL_REPLAY_AGGREGATE_BYTES) {
                 // `rec` is not yet appended to `all`, so it would otherwise
@@ -614,6 +694,18 @@ pub const Engine = struct {
                 return error.WalTooLarge;
             }
             try all.append(self.allocator, rec);
+        }
+
+        // Heal the txn-id allocator past everything the tail contains —
+        // including uncommitted residue (GSP-3) and records that `next()`
+        // skipped via error.InvalidData (unknown type / HMAC-backend
+        // failure). Those records' bytes are preserved by truncation just
+        // like any other CRC-valid record, so their txn_id must never be
+        // reissued either (GSP-3 follow-up). Replay runs single-threaded
+        // inside init, so plain load+store is safe; atomics for consistency.
+        const heal_txn = @max(max_seen_txn, reader.max_skipped_txn);
+        if (heal_txn >= self.next_txn_id.load(.monotonic)) {
+            self.next_txn_id.store(heal_txn + 1, .monotonic);
         }
 
         // Second pass: build the set of committed txn_ids.
@@ -643,18 +735,14 @@ pub const Engine = struct {
         for (all.items) |r| {
             if (r.txn_id <= self.current_manifest.last_checkpoint_lsn) continue;
             if (!committed.contains(r.txn_id)) continue;
-            // Replay runs single-threaded inside init, so a plain
-            // load+store is safe; use atomic accessors for consistency
-            // with the rest of the engine (Phase B1).
-            if (r.txn_id >= self.next_txn_id.load(.monotonic)) {
-                self.next_txn_id.store(r.txn_id + 1, .monotonic);
-            }
             switch (r.record_type) {
                 .index_doc => try self.applyIndexDocPayload(r.doc_id, r.payload, &pos_buf),
                 .delete_doc => try self.memtable.addTombstone(r.doc_id),
                 else => {},
             }
         }
+
+        return reader.consumed;
     }
 
     fn applyIndexDocPayload(
@@ -1043,6 +1131,9 @@ pub const Engine = struct {
         // after this point fails we must remove it so it does not become an
         // orphan referenced by no manifest.
         //
+        // Segment file data is fsynced inside SegmentWriter.writeFile (GSP-7)
+        // so Phase 2's durable manifest never references volatile pages.
+        //
         // Pre-format the segment directory name so the errdefer below cannot
         // itself fail — defer expressions cannot contain `return`/`try`.
         var seg_name_buf: [32]u8 = undefined;
@@ -1287,6 +1378,26 @@ pub const Engine = struct {
             .created_lsn = self.next_txn_id.load(.monotonic) - 1,
             .level = 1,
         });
+        // GSP-8 (graph-storage parity): compaction is the one point where
+        // the whole live corpus is materialized, so heal the checkpoint-
+        // granular corpus stats here — deletes never decrement total_docs
+        // and BM25 consumes both fields (search.zig computeScore). Re-index
+        // double-counting across segments remains documented in
+        // search.zig:134-138; after compact there is a single segment, so
+        // the healed values are exact.
+        const merged_token_len: u64 = blk: {
+            var sum: u64 = 0;
+            var stat_it = merged_mt.dictionary.iterator();
+            while (stat_it.next()) |entry| {
+                for (entry.value_ptr.tfs.items) |tf| sum += tf;
+            }
+            break :blk sum;
+        };
+        self.current_manifest.total_docs = merged_mt.total_docs;
+        self.current_manifest.avg_doc_len = if (merged_mt.total_docs > 0)
+            std.math.cast(u32, @divTrunc(merged_token_len, merged_mt.total_docs)) orelse std.math.maxInt(u32)
+        else
+            0;
         self.current_manifest.counter += 1;
         const man_file = if (self.current_manifest.counter % 2 == 0) "manifest.a" else "manifest.b";
         try self.current_manifest.writeToFileWithHmac(

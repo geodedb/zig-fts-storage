@@ -8,6 +8,17 @@ const limits = @import("limits.zig");
 
 pub const Error = @import("errors.zig").SegmentError;
 
+/// v2 segment-file envelope (GSP-9): magic(4) | version(4 LE) | payload |
+/// crc32c(4, over magic..payload). Uniform across terms.hash, postings.bin,
+/// tombstones.bin, norms.bin; applied INSIDE the AEAD envelope when
+/// encryption is on. The magic's four bytes deliberately decode — as the
+/// u32 LE `count` field every legacy parser reads first — to ~843.5M, far
+/// above every MAX_*_PER_SEGMENT cap (2^24), so a pre-v2 binary that opens
+/// a v2 file fails loudly at its existing count guard instead of misparsing
+/// (graph-storage parity: cross-layout misroutes must trip existing guards).
+pub const SEGMENT_FILE_MAGIC: [4]u8 = .{ 'F', 'S', 'G', '2' };
+pub const SEGMENT_FILE_VERSION: u32 = 2;
+
 // ============================================================================
 // Memtable (In-Memory Staging)
 // ============================================================================
@@ -206,16 +217,38 @@ pub const SegmentWriter = struct {
     /// when `self.aead_key` is non-null (WRK-038). Pulled into a helper so
     /// every file goes through the same envelope path.
     fn writeFile(self: *SegmentWriter, seg_dir: *std.Io.Dir, name: []const u8, buf: []const u8) !void {
+        // Build the v2 envelope (GSP-9). Transient copy is the same order
+        // of memory the AEAD path already pays; acceptable for flush-sized
+        // payloads.
+        const enveloped = try self.allocator.alloc(u8, 8 + buf.len + 4);
+        defer self.allocator.free(enveloped);
+        @memcpy(enveloped[0..4], &SEGMENT_FILE_MAGIC);
+        std.mem.writeInt(u32, enveloped[4..8], SEGMENT_FILE_VERSION, .little);
+        @memcpy(enveloped[8 .. 8 + buf.len], buf);
+        // fips-exempt: non-security — CRC32c integrity checksum (the AEAD
+        // envelope covers integrity-against-adversary when enabled).
+        const crc = utils.hashCrc32c(enveloped[0 .. 8 + buf.len]);
+        std.mem.writeInt(u32, enveloped[8 + buf.len ..][0..4], crc, .little);
+
         const file = try seg_dir.createFile(self.io, name, .{ .permissions = utils.fileMode(0o600) });
         defer file.close(self.io);
 
         if (self.aead_key) |key| {
-            const enc = try utils.aeadEncrypt(self.io, key, buf, self.allocator);
+            const enc = try utils.aeadEncrypt(self.io, key, enveloped, self.allocator);
             defer self.allocator.free(enc);
             try file.writeStreamingAll(self.io, enc);
         } else {
-            try file.writeStreamingAll(self.io, buf);
+            try file.writeStreamingAll(self.io, enveloped);
         }
+
+        // GSP-7: fsync segment data BEFORE flushLocked Phase 2 publishes a
+        // manifest referencing this file and Phase 3 truncates the WAL.
+        // Without this, a durable manifest can point at torn segment pages
+        // that no WAL replay can repair (durable-reference/volatile-data
+        // inversion). Directory-entry durability (the rename/creation
+        // itself) remains a documented std.Io.Dir limitation — see
+        // utils.atomicWrite.
+        try file.sync(self.io);
     }
 
     /// Per-doc length normalization data (norms.bin) for BM25 scoring
@@ -418,6 +451,17 @@ pub const SegmentReader = struct {
     /// tag covers the whole stream — so we cannot stream-decrypt by offset.
     /// Null means "use postings_file" (the plaintext path).
     postings_data: ?[]u8 = null,
+    /// GSP-9: per-segment file format, detected once on terms.hash (whose
+    /// magic is unambiguous — see SEGMENT_FILE_MAGIC doc). `.legacy` reads
+    /// every file verbatim (naked v1 layout); `.enveloped` requires and
+    /// strips the v2 envelope on every file.
+    file_format: FileFormat = .auto,
+    /// Byte offset of the postings payload inside postings.bin: 8 when the
+    /// segment is v2-enveloped (magic+version header), 0 for legacy. Used
+    /// by the plaintext positional-read path in search().
+    postings_base: u64 = 0,
+
+    pub const FileFormat = enum { auto, enveloped, legacy };
 
     // Dictionary cached in memory for fast lookup
     pub const DictEntry = struct {
@@ -523,7 +567,11 @@ pub const SegmentReader = struct {
 
             const doc_delta = try utils.readVarInt(self.data[self.pos..]);
             self.pos += doc_delta.bytes_read;
-            self.last_doc_id += doc_delta.val;
+            // GSP-4: disk-derived deltas get checked arithmetic in every
+            // build mode — a corrupt delta must surface as an error, never
+            // a panic (Debug/ReleaseSafe) or silent wrap (ReleaseFast).
+            self.last_doc_id = std.math.add(u64, self.last_doc_id, doc_delta.val) catch
+                return error.InvalidData;
 
             const tf_res = try utils.readVarInt(self.data[self.pos..]);
             self.pos += tf_res.bytes_read;
@@ -540,7 +588,10 @@ pub const SegmentReader = struct {
             while (i < tf) : (i += 1) {
                 const pos_delta = try utils.readVarInt(self.data[self.pos..]);
                 self.pos += pos_delta.bytes_read;
-                last_pos += @intCast(pos_delta.val);
+                const delta32 = std.math.cast(u32, pos_delta.val) orelse
+                    return error.PositionOutOfRange;
+                last_pos = std.math.add(u32, last_pos, delta32) catch
+                    return error.PositionOutOfRange;
                 self.pos_buf.appendAssumeCapacity(last_pos);
             }
 
@@ -563,7 +614,10 @@ pub const SegmentReader = struct {
 
             const doc_delta = try utils.readVarInt(self.data[self.pos..]);
             self.pos += doc_delta.bytes_read;
-            self.last_doc_id += doc_delta.val;
+            // GSP-4: same checked add as `next` — corrupt delta streams
+            // must error, never panic or wrap.
+            self.last_doc_id = std.math.add(u64, self.last_doc_id, doc_delta.val) catch
+                return error.InvalidData;
 
             const tf_res = try utils.readVarInt(self.data[self.pos..]);
             self.pos += tf_res.bytes_read;
@@ -630,7 +684,11 @@ pub const SegmentReader = struct {
             errdefer self.allocator.free(owned_data);
             var index: usize = 0;
             while (index < owned_data.len) {
-                const amt = try self.postings_file.readPositional(self.io, &.{owned_data[index..]}, entry.postings_offset + index);
+                const amt = try self.postings_file.readPositional(
+                    self.io,
+                    &.{owned_data[index..]},
+                    self.postings_base + entry.postings_offset + index,
+                );
                 if (amt == 0) return error.Incomplete;
                 index += amt;
             }
@@ -660,7 +718,7 @@ pub const SegmentReader = struct {
     /// transparently AEAD-decrypting when `self.aead_key` is set
     /// (WRK-038, GAP-0009, SEC-EXT-0402). Returns null when the file does
     /// not exist. SEC-EXT-0301: refuses to follow symlinks.
-    fn readSegmentFile(self: *SegmentReader, name: []const u8) !?[]u8 {
+    fn readSegmentFile(self: *SegmentReader, name: []const u8, expect: FileFormat) !?[]u8 {
         const file = self.seg_dir.openFile(self.io, name, .{ .follow_symlinks = false }) catch |err| {
             if (err == error.FileNotFound) return null;
             return err;
@@ -671,7 +729,14 @@ pub const SegmentReader = struct {
         const size_usize = std.math.cast(usize, stat.size) orelse return error.PostingsTooLarge;
 
         const raw = try self.allocator.alloc(u8, size_usize);
-        errdefer self.allocator.free(raw);
+        // `raw_owned` tracks whether `raw` still needs freeing via the
+        // errdefer below. The AEAD branch frees `raw` unconditionally once
+        // it has been consumed by `aeadDecrypt` (success or failure) — if
+        // that errdefer stayed armed unconditionally, a later error (e.g.
+        // ChecksumMismatch/UnsupportedSegmentVersion, both reachable only
+        // after a *successful* decrypt) would free `raw` a second time.
+        var raw_owned = true;
+        errdefer if (raw_owned) self.allocator.free(raw);
 
         if (size_usize > 0) {
             var index: usize = 0;
@@ -682,12 +747,52 @@ pub const SegmentReader = struct {
             }
         }
 
-        if (self.aead_key) |key| {
+        const plain = if (self.aead_key) |key| blk: {
+            raw_owned = false;
             defer self.allocator.free(raw);
-            return try utils.aeadDecrypt(key, raw, self.allocator);
-        }
+            break :blk try utils.aeadDecrypt(key, raw, self.allocator);
+        } else raw;
+        errdefer if (self.aead_key != null) self.allocator.free(plain);
 
-        return raw;
+        // GSP-9 envelope handling. `.legacy` returns the bytes verbatim —
+        // legacy postings.bin could coincidentally start with the magic
+        // bytes as valid varint data, so legacy segments are never
+        // envelope-sniffed beyond the initial terms.hash detection.
+        switch (expect) {
+            .legacy => return plain,
+            .auto, .enveloped => {},
+        }
+        const has_magic = plain.len >= 12 and std.mem.eql(u8, plain[0..4], &SEGMENT_FILE_MAGIC);
+        if (!has_magic) {
+            if (expect == .enveloped) return error.InvalidData;
+            // .auto on a naked file: legacy segment.
+            self.file_format = .legacy;
+            return plain;
+        }
+        if (expect == .auto) self.file_format = .enveloped;
+
+        const version = std.mem.readInt(u32, plain[4..8], .little);
+        if (version != SEGMENT_FILE_VERSION) return error.UnsupportedSegmentVersion;
+        const stored_crc = std.mem.readInt(u32, plain[plain.len - 4 ..][0..4], .little);
+        // fips-exempt: non-security — CRC32c integrity checksum (AEAD covers
+        // integrity-against-adversary when enabled).
+        const computed = utils.hashCrc32c(plain[0 .. plain.len - 4]);
+        if (stored_crc != computed) return error.ChecksumMismatch;
+
+        const payload_len = plain.len - 12;
+        std.mem.copyForwards(u8, plain[0..payload_len], plain[8 .. 8 + payload_len]);
+        // OWNERSHIP HAZARD: on the plaintext path `plain == raw` and the
+        // `raw_owned` errdefer above is still armed — it is the sole owner
+        // until this expression completes (the dupe-OOM `try` inside the
+        // catch relies on it). A successful realloc may free-and-move that
+        // memory, so NOTHING fallible may be inserted between the realloc
+        // and the return, or the stale errdefer double-frees.
+        const shrunk = self.allocator.realloc(plain, payload_len) catch blk: {
+            const copy = try self.allocator.dupe(u8, plain[0..payload_len]);
+            self.allocator.free(plain);
+            break :blk copy;
+        };
+        return shrunk;
     }
 
     fn load(self: *SegmentReader) !void {
@@ -700,11 +805,51 @@ pub const SegmentReader = struct {
         // parser since `readSegmentFile` returns the same bytes that used
         // to be streamed.
 
+        // GSP-9: detect the segment's file format on terms.hash FIRST — its
+        // magic is unambiguous (see SEGMENT_FILE_MAGIC). Every other file in
+        // the segment must then match.
+        const dict_buf_opt = try self.readSegmentFile("terms.hash", .auto);
+
+        // GSP-5: materialize AEAD postings before dictionary parse so its
+        // length bounds the (offset, len) validation below. For the v2
+        // plaintext path, verify the postings header eagerly and account
+        // for the 8-byte payload base + 4-byte CRC trailer; whole-file CRC
+        // verification for plaintext postings is deliberately skipped at
+        // open (O(file) read) — integrity there = checked decode (GSP-4)
+        // + extent validation (GSP-5) + AEAD when enabled.
+        if (self.aead_key != null) {
+            self.postings_data = (try self.readSegmentFile("postings.bin", self.file_format)) orelse
+                try self.allocator.alloc(u8, 0);
+        }
+        var postings_size: u64 = 0;
+        if (self.postings_data) |pd| {
+            postings_size = pd.len;
+        } else {
+            const st = try self.postings_file.stat(self.io);
+            if (self.file_format == .enveloped) {
+                if (st.size < 12) return error.Incomplete;
+                var hdr: [8]u8 = undefined;
+                var got: usize = 0;
+                while (got < hdr.len) {
+                    const amt = try self.postings_file.readPositional(self.io, &.{hdr[got..]}, got);
+                    if (amt == 0) return error.Incomplete;
+                    got += amt;
+                }
+                if (!std.mem.eql(u8, hdr[0..4], &SEGMENT_FILE_MAGIC)) return error.InvalidData;
+                const version = std.mem.readInt(u32, hdr[4..8], .little);
+                if (version != SEGMENT_FILE_VERSION) return error.UnsupportedSegmentVersion;
+                self.postings_base = 8;
+                postings_size = st.size - 12;
+            } else {
+                postings_size = st.size;
+            }
+        }
+
         // Load dictionary. PERF-0017: keys are interned into a single
         // per-segment arena instead of N individual `dupe` allocations.
         // Two-pass over dict_buf — first to compute total term bytes so the
         // arena can be sized exactly, second to copy + register entries.
-        if (try self.readSegmentFile("terms.hash")) |dict_buf| {
+        if (dict_buf_opt) |dict_buf| {
             defer self.allocator.free(dict_buf);
             var pos: usize = 0;
             if (dict_buf.len < 4) return error.Incomplete;
@@ -759,6 +904,18 @@ pub const SegmentReader = struct {
                 const offset = utils.readU64Le(dict_buf, &pos);
                 const len = utils.readU64Le(dict_buf, &pos);
 
+                // GSP-5 (graph-storage parity): validate disk-derived extents
+                // at load, symmetrically for plaintext and AEAD paths. A
+                // wrong-but-in-range offset can still decode garbage until
+                // the v2 envelope (GSP-9) adds whole-file CRC — but out-of-
+                // range and absurd entries fail loud at open, not at query.
+                if (len > limits.MAX_POSTINGS_BYTES) return error.PostingsTooLarge;
+                const end = std.math.add(u64, offset, len) catch return error.InvalidData;
+                if (end > postings_size) return error.InvalidData;
+                // Every posting occupies at least one byte, so df can never
+                // exceed the byte length of its postings run.
+                if (df > len) return error.InvalidData;
+
                 self.dictionary.putAssumeCapacityNoClobber(key_slice, .{
                     .df = df,
                     .postings_offset = offset,
@@ -768,7 +925,7 @@ pub const SegmentReader = struct {
         }
 
         // Load tombstones.
-        if (try self.readSegmentFile("tombstones.bin")) |ts_buf| {
+        if (try self.readSegmentFile("tombstones.bin", self.file_format)) |ts_buf| {
             defer self.allocator.free(ts_buf);
             var pos: usize = 0;
             if (ts_buf.len < 4) return error.Incomplete;
@@ -786,7 +943,7 @@ pub const SegmentReader = struct {
 
         // Load per-doc length norms. Absence is fine: pre-WRK-035 segments
         // simply have no norms.bin, and BM25 falls back to DEFAULT_DOC_LEN.
-        if (try self.readSegmentFile("norms.bin")) |norms_buf| {
+        if (try self.readSegmentFile("norms.bin", self.file_format)) |norms_buf| {
             defer self.allocator.free(norms_buf);
             var pos: usize = 0;
             if (norms_buf.len < 4) return error.Incomplete;
@@ -801,15 +958,6 @@ pub const SegmentReader = struct {
                 const length = utils.readU32Le(norms_buf, &pos);
                 self.norms.putAssumeCapacityNoClobber(doc_id, length);
             }
-        }
-
-        // When AEAD is enabled, the postings_file handle cannot be used for
-        // positional reads — the GCM tag covers the entire file so the
-        // ciphertext is not random-accessible. Pre-load and decrypt the
-        // whole file once at init; search() will read from this buffer.
-        if (self.aead_key != null) {
-            self.postings_data = (try self.readSegmentFile("postings.bin")) orelse
-                try self.allocator.alloc(u8, 0);
         }
     }
 };
@@ -856,4 +1004,322 @@ test "memtable and segment write/read roundtrip" {
 
     try std.testing.expectEqual(@as(usize, 1), reader.tombstones.count());
     try std.testing.expect(reader.tombstones.contains(3));
+}
+
+test "PostingIterator rejects doc-id delta overflow instead of panicking (GSP-4)" {
+    const alloc = std.testing.allocator;
+    // Posting 1: doc delta = maxInt(u64), tf = 1, one position delta 1.
+    // Posting 2: doc delta = 1 -> u64 overflow on accumulate.
+    var data: std.ArrayListUnmanaged(u8) = .empty;
+    defer data.deinit(alloc);
+    var vbuf: [10]u8 = undefined;
+    var w = try utils.writeVarInt(&vbuf, std.math.maxInt(u64));
+    try data.appendSlice(alloc, vbuf[0..w]);
+    w = try utils.writeVarInt(&vbuf, 1); // tf
+    try data.appendSlice(alloc, vbuf[0..w]);
+    w = try utils.writeVarInt(&vbuf, 1); // pos delta
+    try data.appendSlice(alloc, vbuf[0..w]);
+    w = try utils.writeVarInt(&vbuf, 1); // posting 2 doc delta -> overflow
+    try data.appendSlice(alloc, vbuf[0..w]);
+    w = try utils.writeVarInt(&vbuf, 1); // tf
+    try data.appendSlice(alloc, vbuf[0..w]);
+    w = try utils.writeVarInt(&vbuf, 1); // pos delta
+    try data.appendSlice(alloc, vbuf[0..w]);
+
+    var it = SegmentReader.PostingIterator{
+        .allocator = alloc,
+        .data = data.items,
+        .owns_data = false,
+        .df = 2,
+        .current_idx = 0,
+        .pos = 0,
+        .last_doc_id = 0,
+        .pos_buf = .empty,
+    };
+    defer it.pos_buf.deinit(alloc);
+    _ = try it.next(); // posting 1: doc_id = maxInt, fine
+    try std.testing.expectError(error.InvalidData, it.next());
+}
+
+test "PostingIterator rejects oversized position delta instead of panicking (GSP-4)" {
+    const alloc = std.testing.allocator;
+    // One posting: doc delta 1, tf 1, position delta maxInt(u64) — the
+    // unchecked @intCast to u32 used to panic (Debug/ReleaseSafe) or wrap
+    // silently (ReleaseFast).
+    var data: std.ArrayListUnmanaged(u8) = .empty;
+    defer data.deinit(alloc);
+    var vbuf: [10]u8 = undefined;
+    var w = try utils.writeVarInt(&vbuf, 1);
+    try data.appendSlice(alloc, vbuf[0..w]);
+    w = try utils.writeVarInt(&vbuf, 1);
+    try data.appendSlice(alloc, vbuf[0..w]);
+    w = try utils.writeVarInt(&vbuf, std.math.maxInt(u64));
+    try data.appendSlice(alloc, vbuf[0..w]);
+
+    var it = SegmentReader.PostingIterator{
+        .allocator = alloc,
+        .data = data.items,
+        .owns_data = false,
+        .df = 1,
+        .current_idx = 0,
+        .pos = 0,
+        .last_doc_id = 0,
+        .pos_buf = .empty,
+    };
+    defer it.pos_buf.deinit(alloc);
+    try std.testing.expectError(error.PositionOutOfRange, it.next());
+}
+
+test "nextDocOnly rejects doc-id delta overflow (GSP-4)" {
+    const alloc = std.testing.allocator;
+    var data: std.ArrayListUnmanaged(u8) = .empty;
+    defer data.deinit(alloc);
+    var vbuf: [10]u8 = undefined;
+    var w = try utils.writeVarInt(&vbuf, std.math.maxInt(u64));
+    try data.appendSlice(alloc, vbuf[0..w]);
+    w = try utils.writeVarInt(&vbuf, 0); // tf = 0, no positions
+    try data.appendSlice(alloc, vbuf[0..w]);
+    w = try utils.writeVarInt(&vbuf, 1); // posting 2 delta -> overflow
+    try data.appendSlice(alloc, vbuf[0..w]);
+    w = try utils.writeVarInt(&vbuf, 0);
+    try data.appendSlice(alloc, vbuf[0..w]);
+
+    var it = SegmentReader.PostingIterator{
+        .allocator = alloc,
+        .data = data.items,
+        .owns_data = false,
+        .df = 2,
+        .current_idx = 0,
+        .pos = 0,
+        .last_doc_id = 0,
+        .pos_buf = .empty,
+    };
+    defer it.pos_buf.deinit(alloc);
+    _ = try it.nextDocOnly();
+    try std.testing.expectError(error.InvalidData, it.nextDocOnly());
+}
+
+test "SegmentReader.load rejects dictionary entries pointing outside postings.bin (GSP-5)" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    try tmp_dir.dir.createDir(io, "seg_1", .default_dir);
+    var seg_dir = try tmp_dir.dir.openDir(io, "seg_1", .{});
+    defer seg_dir.close(io);
+
+    // terms.hash claiming (offset=0, len=1 GiB) against an 8-byte postings.bin.
+    var dict: std.ArrayListUnmanaged(u8) = .empty;
+    defer dict.deinit(alloc);
+    var num: [8]u8 = undefined;
+    std.mem.writeInt(u32, num[0..4], 1, .little); // count = 1
+    try dict.appendSlice(alloc, num[0..4]);
+    std.mem.writeInt(u16, num[0..2], 1, .little); // term_len = 1
+    try dict.appendSlice(alloc, num[0..2]);
+    try dict.append(alloc, 't');
+    std.mem.writeInt(u64, num[0..8], 1, .little); // df
+    try dict.appendSlice(alloc, num[0..8]);
+    std.mem.writeInt(u64, num[0..8], 0, .little); // postings_offset
+    try dict.appendSlice(alloc, num[0..8]);
+    std.mem.writeInt(u64, num[0..8], 1 << 30, .little); // postings_len — hostile
+    try dict.appendSlice(alloc, num[0..8]);
+
+    {
+        const f = try seg_dir.createFile(io, "terms.hash", .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, dict.items);
+    }
+    {
+        const f = try seg_dir.createFile(io, "postings.bin", .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, &[_]u8{0} ** 8);
+    }
+
+    // Pre-fix: init succeeds and the bad entry waits to poison a query.
+    // Post-fix: load rejects at open.
+    try std.testing.expectError(
+        error.InvalidData,
+        SegmentReader.init(io, alloc, tmp_dir.dir, 1),
+    );
+}
+
+test "segment v2 envelope round-trips and legacy naked files still load (GSP-9)" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // Write a segment through the writer (v2 enveloped post-fix).
+    var mt = Memtable.init(alloc);
+    defer mt.deinit();
+    try mt.addPosting("hello", 1, &[_]u32{ 1, 3 });
+    try mt.addPosting("hello", 2, &[_]u32{2});
+    try mt.addTombstone(9);
+    var writer = SegmentWriter{ .io = io, .dir = tmp_dir.dir, .allocator = alloc, .segment_id = 1 };
+    try writer.writeMemtable(&mt);
+
+    // terms.hash must start with the magic.
+    {
+        var seg_dir = try tmp_dir.dir.openDir(io, "seg_1", .{});
+        defer seg_dir.close(io);
+        const f = try seg_dir.openFile(io, "terms.hash", .{});
+        defer f.close(io);
+        var hdr: [4]u8 = undefined;
+        _ = try f.readPositional(io, &.{&hdr}, 0);
+        try std.testing.expectEqualSlices(u8, &SEGMENT_FILE_MAGIC, &hdr);
+    }
+
+    // v2 reader round-trip.
+    {
+        var sr = try SegmentReader.init(io, alloc, tmp_dir.dir, 1);
+        defer sr.deinit();
+        var it = (try sr.search("hello")).?;
+        defer it.deinit();
+        const p1 = (try it.next()).?;
+        try std.testing.expectEqual(@as(u64, 1), p1.doc_id);
+        try std.testing.expect(sr.tombstones.contains(9));
+    }
+
+    // Strip the envelope from every file -> legacy naked layout; the reader
+    // must still load it (permanent read-both).
+    {
+        var seg_dir = try tmp_dir.dir.openDir(io, "seg_1", .{});
+        defer seg_dir.close(io);
+        for ([_][]const u8{ "terms.hash", "postings.bin", "tombstones.bin", "norms.bin" }) |name| {
+            const f = seg_dir.openFile(io, name, .{}) catch |err| {
+                if (err == error.FileNotFound) continue;
+                return err;
+            };
+            const stat = try f.stat(io);
+            const buf = try alloc.alloc(u8, @intCast(stat.size));
+            defer alloc.free(buf);
+            var idx: usize = 0;
+            while (idx < buf.len) {
+                const amt = try f.readPositional(io, &.{buf[idx..]}, idx);
+                if (amt == 0) break;
+                idx += amt;
+            }
+            f.close(io);
+            try seg_dir.deleteFile(io, name);
+            const nf = try seg_dir.createFile(io, name, .{});
+            defer nf.close(io);
+            try nf.writeStreamingAll(io, buf[8 .. buf.len - 4]);
+            try nf.sync(io);
+        }
+        var sr = try SegmentReader.init(io, alloc, tmp_dir.dir, 1);
+        defer sr.deinit();
+        var it = (try sr.search("hello")).?;
+        defer it.deinit();
+        const p1 = (try it.next()).?;
+        try std.testing.expectEqual(@as(u64, 1), p1.doc_id);
+    }
+}
+
+test "segment v2 envelope detects payload corruption and rejects future versions (GSP-9)" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var mt = Memtable.init(alloc);
+    defer mt.deinit();
+    try mt.addPosting("term", 1, &[_]u32{1});
+    var writer = SegmentWriter{ .io = io, .dir = tmp_dir.dir, .allocator = alloc, .segment_id = 1 };
+    try writer.writeMemtable(&mt);
+
+    var seg_dir = try tmp_dir.dir.openDir(io, "seg_1", .{});
+    defer seg_dir.close(io);
+
+    // Flip one payload byte in terms.hash: pre-envelope this was silently
+    // absorbed or surfaced as a confusing structural error; now it is a
+    // deterministic ChecksumMismatch at open.
+    {
+        const f = try seg_dir.openFile(io, "terms.hash", .{ .mode = .read_write });
+        defer f.close(io);
+        var b: [1]u8 = undefined;
+        _ = try f.readPositional(io, &.{&b}, 9);
+        b[0] ^= 0xFF;
+        try f.writePositionalAll(io, &b, 9);
+        try f.sync(io);
+    }
+    try std.testing.expectError(
+        error.ChecksumMismatch,
+        SegmentReader.init(io, alloc, tmp_dir.dir, 1),
+    );
+
+    // Repair the byte, then stamp version=3 with a recomputed CRC: must be
+    // UnsupportedSegmentVersion (the downgrade gate), not a misparse.
+    {
+        const f = try seg_dir.openFile(io, "terms.hash", .{ .mode = .read_write });
+        defer f.close(io);
+        var b: [1]u8 = undefined;
+        _ = try f.readPositional(io, &.{&b}, 9);
+        b[0] ^= 0xFF;
+        try f.writePositionalAll(io, &b, 9);
+        const stat = try f.stat(io);
+        const buf = try alloc.alloc(u8, @intCast(stat.size));
+        defer alloc.free(buf);
+        var idx: usize = 0;
+        while (idx < buf.len) {
+            const amt = try f.readPositional(io, &.{buf[idx..]}, idx);
+            if (amt == 0) break;
+            idx += amt;
+        }
+        std.mem.writeInt(u32, buf[4..8], 3, .little);
+        const crc = utils.hashCrc32c(buf[0 .. buf.len - 4]);
+        std.mem.writeInt(u32, buf[buf.len - 4 ..][0..4], crc, .little);
+        try f.writePositionalAll(io, buf, 0);
+        try f.sync(io);
+    }
+    try std.testing.expectError(
+        error.UnsupportedSegmentVersion,
+        SegmentReader.init(io, alloc, tmp_dir.dir, 1),
+    );
+}
+
+test "AEAD path: post-decrypt version mismatch does not double-free the ciphertext scratch buffer (GSP-9)" {
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    const key = "32-bytes-of-aes-gcm-key-PLEASE!!";
+    try std.testing.expectEqual(@as(usize, 32), key.len);
+
+    var mt = Memtable.init(alloc);
+    defer mt.deinit();
+    try mt.addPosting("term", 1, &[_]u32{1});
+    var writer = SegmentWriter{ .io = io, .dir = tmp_dir.dir, .allocator = alloc, .segment_id = 1, .aead_key = key };
+    try writer.writeMemtable(&mt);
+
+    // Craft a custom v2-enveloped payload with version=3, authentically
+    // AEAD-encrypted under the real key, and overwrite terms.hash with it.
+    {
+        var seg_dir = try tmp_dir.dir.openDir(io, "seg_1", .{});
+        defer seg_dir.close(io);
+
+        var payload_buf: [64]u8 = undefined;
+        @memcpy(payload_buf[0..4], &SEGMENT_FILE_MAGIC);
+        std.mem.writeInt(u32, payload_buf[4..8], 3, .little); // future version
+        const fake_payload = "hello-world-payload";
+        @memcpy(payload_buf[8 .. 8 + fake_payload.len], fake_payload);
+        const crc = utils.hashCrc32c(payload_buf[0 .. 8 + fake_payload.len]);
+        std.mem.writeInt(u32, payload_buf[8 + fake_payload.len ..][0..4], crc, .little);
+        const enveloped = payload_buf[0 .. 8 + fake_payload.len + 4];
+
+        const enc = try utils.aeadEncrypt(io, key, enveloped, alloc);
+        defer alloc.free(enc);
+
+        try seg_dir.deleteFile(io, "terms.hash");
+        const f = try seg_dir.createFile(io, "terms.hash", .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, enc);
+        try f.sync(io);
+    }
+
+    try std.testing.expectError(
+        error.UnsupportedSegmentVersion,
+        SegmentReader.initWithAead(io, alloc, tmp_dir.dir, 1, key),
+    );
 }

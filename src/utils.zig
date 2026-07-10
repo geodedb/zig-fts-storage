@@ -246,8 +246,10 @@ pub fn aeadDecrypt(
 ///   consistent. The lack of a parent-dir fsync means a crash *immediately*
 ///   after the rename returns can lose the rename itself on some
 ///   filesystems (ext4 default `data=ordered` mostly mitigates this; XFS
-///   needs an explicit dirsync). Acceptable for v0.1 because the WAL is
-///   the durability source of truth and manifest replay is idempotent.
+///   needs an explicit dirsync). Acceptable for v0.1 because manifest replay
+///   is idempotent and (GSP-7) segment file DATA is fsynced before any
+///   manifest references it — the remaining exposure is the directory
+///   entry itself, not file contents.
 /// - **Windows:** `MoveFileExW` / `ReplaceFileW` semantics. `std.Io.Dir.rename`
 ///   maps onto Win32 atomic replace where supported (NTFS, ReFS), which is
 ///   atomic w.r.t. other processes that open with `FILE_SHARE_*` flags.

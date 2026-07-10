@@ -44,7 +44,7 @@
 const std = @import("std");
 
 /// Library version. Keep in sync with build.zig.zon.
-pub const version: []const u8 = "0.1.1";
+pub const version: []const u8 = "0.1.3";
 
 pub const wal = @import("wal.zig");
 pub const manifest = @import("manifest.zig");
