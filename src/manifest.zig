@@ -143,6 +143,12 @@ pub const Manifest = struct {
         // the version field still reports ChecksumMismatch; a structurally
         // valid manifest from a different binary generation reports
         // UnsupportedManifestVersion. Never discriminate by length alone.
+        //
+        // Ordering caveat: when an HMAC key is configured, the check order
+        // above is HMAC -> CRC -> version, so corruption of the version
+        // field is caught by the HMAC verify and reports HmacMismatch
+        // there instead — the "random corruption reports ChecksumMismatch"
+        // claim above applies to the no-HMAC path only.
         if (m.format_version != MANIFEST_VERSION) return error.UnsupportedManifestVersion;
         m.counter = utils.readU64Le(data, &pos);
         m.last_checkpoint_lsn = utils.readU64Le(data, &pos);

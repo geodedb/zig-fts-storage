@@ -331,6 +331,16 @@ pub const WalReader = struct {
             };
 
             if (!std.mem.eql(u8, &stored_tag, &computed_tag)) return error.HmacMismatch;
+            // Truncation-accounting guard (tests/fault_injection.zig "HMAC-mode
+            // truncation accounting..."): this must fold the tag length into
+            // `record_bytes` BEFORE it is added to `self.consumed` below. If
+            // `consumed` ever understated a record's true on-disk length by
+            // the trailing HMAC tag, the NEXT engine open's
+            // `if (wal_stat.size > wal_valid_bytes) setLength(...)`
+            // truncation (engine.zig) would chop the tag off what was the
+            // last valid record, and the reopen AFTER that would see a
+            // torn/incomplete record and silently drop it — losing a write
+            // that had already been fsync-acknowledged as durable.
             record_bytes += Hmac.mac_length;
         }
 

@@ -375,3 +375,192 @@ test "fault: future-version manifest fails engine init loudly, not as corrupt-sl
         fts.Engine.init(io, alloc, tmp_dir.dir),
     );
 }
+
+test "fault: future-version AEAD segment fails engine init loudly, not quarantined (GSP-9)" {
+    // Mirrors the manifest-side GSP-6 gate above, but for the segment-file
+    // envelope under AEAD. Pre-fix, `UnsupportedSegmentVersion` fell through
+    // the generic quarantine arm of the segment-load loop in
+    // Engine.initWithConfig whenever `aead_key` was configured: the segment
+    // got renamed to `seg_1.corrupt`, the engine came up with zero segments,
+    // and the next flush would have permanently dropped the manifest's
+    // reference to it. A newer-binary segment envelope is a deployment
+    // condition (like UnsupportedManifestVersion), not corruption — it must
+    // fail loud and the segment must survive on disk untouched so a
+    // downgrade can still recover it.
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // Exactly 32 bytes = Aes256Gcm key length.
+    const key = "32-bytes-of-aes-gcm-key-PLEASE!!";
+    try std.testing.expectEqual(@as(usize, 32), key.len);
+
+    // Build a store WITH AEAD, index one doc, flush, deinit.
+    {
+        var eng = try fts.Engine.initWithConfig(io, alloc, tmp_dir.dir, .{ .aead_key = key });
+        defer eng.deinit();
+        const t = fts.TermPosting{ .term = "future", .positions = &[_]u32{1} };
+        try eng.indexDocument(1, &[_]fts.TermPosting{t});
+        try eng.flush();
+    }
+
+    // Stamp seg_1/terms.hash's envelope version to 3. The file is
+    // AEAD-encrypted on disk, so decrypt -> patch -> recompute CRC ->
+    // re-encrypt -> write back.
+    {
+        var seg_root = try tmp_dir.dir.openDir(io, "segments", .{});
+        defer seg_root.close(io);
+        var seg_dir = try seg_root.openDir(io, "seg_1", .{});
+        defer seg_dir.close(io);
+
+        const raw: []u8 = blk: {
+            const f = try seg_dir.openFile(io, "terms.hash", .{});
+            defer f.close(io);
+            const stat = try f.stat(io);
+            const buf = try alloc.alloc(u8, @intCast(stat.size));
+            errdefer alloc.free(buf);
+            var idx: usize = 0;
+            while (idx < buf.len) {
+                const amt = try f.readPositional(io, &.{buf[idx..]}, idx);
+                if (amt == 0) break;
+                idx += amt;
+            }
+            break :blk buf;
+        };
+        defer alloc.free(raw);
+
+        const plain = try fts.utils.aeadDecrypt(key, raw, alloc);
+        defer alloc.free(plain);
+
+        // Envelope layout: magic(4) | version(4 LE) | payload | crc(4).
+        // Patch the version field to a future value...
+        std.mem.writeInt(u32, plain[4..8], 3, .little);
+        // ...and recompute the CRC over everything but the trailing 4 bytes
+        // so the tamper looks like an authentic write from a newer binary,
+        // not random corruption.
+        const crc = fts.utils.hashCrc32c(plain[0 .. plain.len - 4]);
+        std.mem.writeInt(u32, plain[plain.len - 4 ..][0..4], crc, .little);
+
+        const enc = try fts.utils.aeadEncrypt(io, key, plain, alloc);
+        defer alloc.free(enc);
+
+        try seg_dir.deleteFile(io, "terms.hash");
+        const nf = try seg_dir.createFile(io, "terms.hash", .{});
+        defer nf.close(io);
+        try nf.writeStreamingAll(io, enc);
+        try nf.sync(io);
+    }
+
+    // Reopen with the same AEAD key: must fail loud with
+    // UnsupportedSegmentVersion, not silently quarantine and come up empty.
+    try std.testing.expectError(
+        error.UnsupportedSegmentVersion,
+        fts.Engine.initWithConfig(io, alloc, tmp_dir.dir, .{ .aead_key = key }),
+    );
+
+    // The segment directory must NOT have been renamed to `seg_1.corrupt` —
+    // confirm `seg_1` still opens.
+    {
+        var seg_root = try tmp_dir.dir.openDir(io, "segments", .{});
+        defer seg_root.close(io);
+        var seg_dir = try seg_root.openDir(io, "seg_1", .{});
+        seg_dir.close(io);
+    }
+}
+
+test "fault: HMAC-mode WAL truncation accounting survives a third reopen" {
+    // Guards `record_bytes += Hmac.mac_length` in WalReader.next
+    // (src/wal.zig): if `consumed` ever understated an HMAC-tagged record's
+    // true on-disk length by the tag size, the SECOND open's
+    // `if (wal_stat.size > wal_valid_bytes) setLength(...)` truncation in
+    // Engine.initWithConfig would chop the trailing tag bytes off what was
+    // the last valid (and already fsync-acknowledged) record. The THIRD
+    // open would then replay a torn/incomplete record and silently drop it
+    // — the doc would vanish only on the *third* open, not the second,
+    // which is why this test carries the write through two full reopens
+    // rather than just one.
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    const key = "hmac-wal-truncation-guard-key!!!";
+
+    // Session 1: index one doc under HMAC, no flush, so it only lives in
+    // the WAL on disk.
+    {
+        var eng = try fts.Engine.initWithConfig(io, alloc, tmp_dir.dir, .{ .hmac_key = key });
+        defer eng.deinit();
+        const t = fts.TermPosting{ .term = "wal-hmac-tail", .positions = &[_]u32{1} };
+        try eng.indexDocument(1, &[_]fts.TermPosting{t});
+    }
+
+    // Session 2: reopen with the same key. Replay must recover the doc from
+    // the WAL. If replay under-truncates here, the on-disk WAL is already
+    // corrupted at this point even though this session still sees the doc.
+    {
+        var eng = try fts.Engine.initWithConfig(io, alloc, tmp_dir.dir, .{ .hmac_key = key });
+        defer eng.deinit();
+        try std.testing.expect(eng.memtable.dictionary.contains("wal-hmac-tail"));
+    }
+
+    // Session 3: the doc must STILL be present. This is the observable that
+    // actually catches the bug this test guards against.
+    {
+        var eng = try fts.Engine.initWithConfig(io, alloc, tmp_dir.dir, .{ .hmac_key = key });
+        defer eng.deinit();
+        try std.testing.expect(eng.memtable.dictionary.contains("wal-hmac-tail"));
+    }
+}
+
+test "fault: single stamped manifest slot fails loud even with the other slot healthy (GSP-6)" {
+    // Complements "fault: future-version manifest fails engine init loudly"
+    // above (which stamps BOTH slots). Here only manifest.a is stamped to a
+    // future format_version while manifest.b is left healthy — the version
+    // gate must still fail loud rather than silently falling back to the
+    // surviving slot the way the A/B corrupt-slot fallback does for bit rot.
+    const alloc = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // Two flushes so both manifest.a (counter=2, even) and manifest.b
+    // (counter=1, odd) exist on disk (the A/B rotation alternates by
+    // counter parity).
+    {
+        var eng = try fts.Engine.init(io, alloc, tmp_dir.dir);
+        defer eng.deinit();
+        const t = fts.TermPosting{ .term = "single-slot", .positions = &[_]u32{1} };
+        try eng.indexDocument(1, &[_]fts.TermPosting{t});
+        try eng.flush();
+        try eng.indexDocument(2, &[_]fts.TermPosting{t});
+        try eng.flush();
+    }
+
+    // Stamp ONLY manifest.a to format_version 3 with a recomputed CRC;
+    // manifest.b is untouched.
+    {
+        const f = try tmp_dir.dir.openFile(io, "manifest.a", .{ .mode = .read_write });
+        defer f.close(io);
+        const stat = try f.stat(io);
+        const buf = try alloc.alloc(u8, @intCast(stat.size));
+        defer alloc.free(buf);
+        var idx: usize = 0;
+        while (idx < buf.len) {
+            const amt = try f.readPositional(io, &.{buf[idx..]}, idx);
+            if (amt == 0) break;
+            idx += amt;
+        }
+        std.mem.writeInt(u32, buf[8..12], 3, .little);
+        const crc = fts.utils.hashCrc32c(buf[0 .. buf.len - 4]);
+        std.mem.writeInt(u32, buf[buf.len - 4 ..][0..4], crc, .little);
+        try f.writePositionalAll(io, buf, 0);
+        try f.sync(io);
+    }
+
+    try std.testing.expectError(
+        error.UnsupportedManifestVersion,
+        fts.Engine.init(io, alloc, tmp_dir.dir),
+    );
+}

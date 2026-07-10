@@ -73,4 +73,11 @@ pub const EngineError = error{
     /// deployment condition, not corruption — it must never be masked by
     /// the A/B corrupt-slot fallback or misparsed at a guessed layout.
     UnsupportedManifestVersion,
+    /// Segment-file envelope carries a version this binary does not
+    /// implement (GSP-9). Surfaced by `Engine.init`/`initWithConfig` on
+    /// both the plaintext and AEAD-encrypted segment-load paths. Like
+    /// `UnsupportedManifestVersion`, this is a deployment condition (a
+    /// newer binary wrote the segment), not corruption — it must always
+    /// fail loud and must never be quarantined to `seg_<id>.corrupt`.
+    UnsupportedSegmentVersion,
 };

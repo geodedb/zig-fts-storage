@@ -277,14 +277,28 @@ pub const Engine = struct {
         // wrong-key manifest must not be silently masked by falling back to
         // the other slot (SEC-02, SEC-EXT-0401, GAP-0027). The A/B fallback
         // is explicitly designed to recover from bit rot, not tampering.
-        if (res_a == .hmac_mismatch or res_b == .hmac_mismatch) return error.HmacMismatch;
+        //
+        // Both fail-loud branches below may be reached while the OTHER slot
+        // parsed successfully (`.ok`) — e.g. one healthy manifest next to one
+        // tampered/future-version one. That surviving `.ok` Manifest owns a
+        // heap-allocated segments list that nothing else will ever free once
+        // we return early here, so it must be torn down explicitly first
+        // (freeManifestResultIfOk) rather than silently leaked.
+        if (res_a == .hmac_mismatch or res_b == .hmac_mismatch) {
+            freeManifestResultIfOk(allocator, res_a);
+            freeManifestResultIfOk(allocator, res_b);
+            return error.HmacMismatch;
+        }
 
         // GSP-6: a format_version this binary does not implement is a
         // deployment condition (upgrade/downgrade mismatch), not corruption.
         // It must never be masked by the A/B corrupt-slot fallback — fail
         // loud on either slot, just like HmacMismatch above.
-        if (res_a == .unsupported_version or res_b == .unsupported_version)
+        if (res_a == .unsupported_version or res_b == .unsupported_version) {
+            freeManifestResultIfOk(allocator, res_a);
+            freeManifestResultIfOk(allocator, res_b);
             return error.UnsupportedManifestVersion;
+        }
 
         if (res_a == .corrupt and res_b == .corrupt) return error.ManifestCorrupt;
 
@@ -346,7 +360,16 @@ pub const Engine = struct {
                 // HMAC mismatch must NEVER be quarantined — wrong-key /
                 // tampering has to surface, not be silently walked past
                 // (SEC-02, SEC-EXT-0401, GAP-0027).
-                if (err == error.HmacMismatch) return err;
+                //
+                // Same for UnsupportedSegmentVersion: like the manifest's
+                // format_version gate (errors.zig calls this "a deployment
+                // condition, not corruption"), a segment envelope written by
+                // a newer binary generation must surface loudly, not be
+                // renamed to `seg_<id>.corrupt`. Quarantining it would let
+                // the next flush silently rewrite the manifest without that
+                // segment's entry — permanently destroying the only path
+                // back to a compatible (older) binary, i.e. a downgrade.
+                if (err == error.HmacMismatch or err == error.UnsupportedSegmentVersion) return err;
 
                 // Without AEAD configured, refuse to quarantine: the load
                 // failure is more likely a "you forgot to pass aead_key"
@@ -572,6 +595,19 @@ pub const Engine = struct {
             // which is exactly the silent-data-loss regression A/B
             // rotation exists to prevent.
             else => return .corrupt,
+        }
+    }
+
+    /// Frees the `Manifest` owned by `result` if it parsed successfully
+    /// (`.ok`); a no-op for every other variant. Used by the fail-loud paths
+    /// in `initWithConfig` (HmacMismatch, UnsupportedManifestVersion) so a
+    /// healthy manifest slot sitting next to a bad one does not leak its
+    /// segments list when we return before `selectManifest` ever takes
+    /// ownership of it.
+    fn freeManifestResultIfOk(allocator: Allocator, result: ManifestLoadResult) void {
+        if (result == .ok) {
+            var m = result.ok;
+            m.deinit(allocator);
         }
     }
 
