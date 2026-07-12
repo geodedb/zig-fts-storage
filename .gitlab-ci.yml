@@ -249,7 +249,7 @@ zig-test-windows-stress-0.16.0:
 # ---------------------------------------------------------------
 
 .zig-host-base:
-  image: "ubuntu:24.04"
+  image: "ubuntu:26.04"
   interruptible: true
   before_script:
   - apt-get update -qq
