@@ -1,6 +1,6 @@
 .{
     .name = .fts_storage,
-    .version = "0.1.3",
+    .version = "0.1.5",
     .fingerprint = 0xa07a12457734a375,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
@@ -14,8 +14,8 @@
         // Zig 0.16 rejects absolute .path values; this is the build-root-
         // relative path to /home/benji/src/devnw/zig/fips.
         .fips = .{
-            .url = "git+https://gitlab.com/devnw/zig/fips.git#v0.1.0",
-            .hash = "fips-0.1.0-1wf3nbxWBgAp6yAk6cPRrF5l_U1tbblcVcN9xcjJDddy",
+            .url = "git+https://gitlab.com/devnw/zig/fips.git?ref=v0.1.1#4041d9cfdeadcab665644b3f4d3362c276f94bb7",
+            .hash = "fips-0.1.1-1wf3na01BwC3voljVu61_0g6DXp6BCedXrq4QMuMeQBq",
             .lazy = true,
         },
     },
