@@ -348,6 +348,9 @@ scale-bench:
 fips-deps:
   extends: .zig-host-base
   stage: build
+  # Pin to x86: fips-deps hands a compiled OpenSSL to test-fips as an
+  # artifact, so both jobs must run on the same CPU architecture.
+  tags: [company, linux, x86]
   script:
     # GitLab artifacts must live under $CI_PROJECT_DIR — /usr/local/ssl is
     # outside the project dir and cannot be uploaded, so build into a
@@ -370,6 +373,9 @@ fips-deps:
 test-fips:
   extends: .zig-host-base
   stage: test
+  # Pin to x86: fips-deps hands a compiled OpenSSL to test-fips as an
+  # artifact, so both jobs must run on the same CPU architecture.
+  tags: [company, linux, x86]
   script:
     - OPENSSL_CONF="$CI_PROJECT_DIR/.openssl-fips/ssl/openssl.cnf" zig build test -Dfips=true -Dopenssl_path="$CI_PROJECT_DIR/.openssl-fips" --summary all
   needs:
