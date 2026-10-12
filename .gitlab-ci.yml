@@ -35,6 +35,7 @@ default:
   tags:
   - company
   - linux
+  - x86
 
 include:
   # SEC-08 / SEC-EXT-0503: catalog components currently pinned to mutable semver
@@ -42,20 +43,36 @@ include:
   # refs. Tracked as Won't-Do in docs/SECURITY_GAP_ANALYSIS.md.
   # Security scanning
 - component: gitlab.com/devnw/ci-catalog/security-sast@v1.55.8
+  inputs:
+    tags: ["company", "linux", "x86"]
 - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1.55.8
+  inputs:
+    tags: ["company", "linux", "x86"]
 - component: gitlab.com/devnw/ci-catalog/security-secrets@v1.55.8
+  inputs:
+    tags: ["company", "linux", "x86"]
 - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1.55.8
+  inputs:
+    tags: ["company", "linux", "x86"]
 
   # SBOM
 - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.55.8
+  inputs:
+    tags: ["company", "linux", "x86"]
 - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.55.8
+  inputs:
+    tags: ["company", "linux", "x86"]
 
   # Release
 - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.55.8
+  inputs:
+    tags: ["company", "linux", "x86"]
+    release_auth: job_token
 
   # Zig formatting (Linux).
 - component: gitlab.com/devnw/ci-catalog/zig-format@v1.55.8
   inputs:
+    tags: ["company", "linux", "x86"]
     zig_version: "0.16.0"
     # DO-4: include benchmarks/ and build.zig so the formatter covers every
     # checked-in Zig source, not just the library + tests + examples.
@@ -64,6 +81,7 @@ include:
   # Zig build (Linux): static lib + CLI + check-compile.
 - component: gitlab.com/devnw/ci-catalog/zig-build@v1.55.8
   inputs:
+    tags: ["company", "linux", "x86"]
     stage: build
     zig_version: "0.16.0"
     build_options: "build check"
@@ -71,35 +89,41 @@ include:
   # Zig tests — Linux matrix across optimize modes + integration + stress.
 - component: gitlab.com/devnw/ci-catalog/zig-test@v1.55.8
   inputs:
+    tags: ["company", "linux", "x86"]
     zig_version: "0.16.0"
     job_suffix: "-unit-debug"
     test_step: "test"
     optimize: "Debug"
 - component: gitlab.com/devnw/ci-catalog/zig-test@v1.55.8
   inputs:
+    tags: ["company", "linux", "x86"]
     zig_version: "0.16.0"
     job_suffix: "-unit-releasesafe"
     test_step: "test"
     optimize: "ReleaseSafe"
 - component: gitlab.com/devnw/ci-catalog/zig-test@v1.55.8
   inputs:
+    tags: ["company", "linux", "x86"]
     zig_version: "0.16.0"
     job_suffix: "-unit-releasefast"
     test_step: "test"
     optimize: "ReleaseFast"
 - component: gitlab.com/devnw/ci-catalog/zig-test@v1.55.8
   inputs:
+    tags: ["company", "linux", "x86"]
     zig_version: "0.16.0"
     job_suffix: "-unit-releasesmall"
     test_step: "test"
     optimize: "ReleaseSmall"
 - component: gitlab.com/devnw/ci-catalog/zig-test@v1.55.8
   inputs:
+    tags: ["company", "linux", "x86"]
     zig_version: "0.16.0"
     job_suffix: "-integration"
     test_step: "test-integration"
 - component: gitlab.com/devnw/ci-catalog/zig-test@v1.55.8
   inputs:
+    tags: ["company", "linux", "x86"]
     zig_version: "0.16.0"
     job_suffix: "-stress"
     test_step: "test-stress"
@@ -114,6 +138,7 @@ include:
   # a default-branch nightly extension.
 - component: gitlab.com/devnw/ci-catalog/zig-fuzz@v1.55.8
   inputs:
+    tags: ["company", "linux", "x86"]
     zig_version: "0.16.0"
     test_step: "test"
     test_options: "--fuzz"
@@ -171,6 +196,8 @@ include:
     test_step: "test-stress"
     tags: ["company", "windows"]
 - component: gitlab.com/devnw/ci-catalog/zig-version-tag-check@v1.55.8
+  inputs:
+    tags: ["company", "linux", "x86"]
 
 variables:
   ZIG_VERSION: "0.16.0"
@@ -383,3 +410,13 @@ test-fips:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+# SONNY-4778: tools must not redirect Git operations into this worktree.
+hook-env-regression:
+  stage: lint
+  image: python:3.14-slim-bookworm
+  tags: [company, linux, x86]
+  before_script:
+    - apt-get update -qq && apt-get install -y --no-install-recommends git
+  script:
+    - python3 scripts/test_hook_env.py
