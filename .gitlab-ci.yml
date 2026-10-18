@@ -386,7 +386,7 @@ fips-deps:
     # (3.0.13 — no ML-KEM, fails verify-fips-provider.sh). Bump this pin
     # alongside OpenSSL 3.x LTS releases. Same latent bug flagged upstream
     # in devnw/zig/fips' copy of the resolver.
-    - OPENSSL_PREFIX="$CI_PROJECT_DIR/.openssl-fips" OPENSSL_VERSION="3.6.3" make deps
+    - OPENSSL_PREFIX="$CI_PROJECT_DIR/.openssl-fips" OPENSSL_VERSION="3.6.5" make deps
   artifacts:
     paths:
       - .openssl-fips/
