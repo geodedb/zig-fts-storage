@@ -318,6 +318,10 @@ test-asan:
 benchmark-regression:
   extends: .zig-host-base
   stage: performance
+  # These scenarios fsync millions of individual WAL records. EBS-backed
+  # overflow workers time out before completing the unchanged workload.
+  tags: [company, linux, x86, local-nvme]
+  resource_group: fts-storage-benchmark
   rules: *bench-rules
   # Advisory (the posture the header comment above always prescribed):
   # measured cross-run variance on the shared runners is ±45% for identical

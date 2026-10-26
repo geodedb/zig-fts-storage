@@ -137,6 +137,17 @@ artifact. It only enforces the gate when `benchmarks/results/baseline.json`
 exists; until then it logs and passes. Drop `allow_failure: true` from
 the job once the baseline is established.
 
+The full suite requires the `local-nvme` runner tag. It currently routes
+to the OVH shadowfax runner (GitLab runner 52758884), whose build storage
+uses mirrored local NVMe. Assign that tag only to runners with equivalent
+local storage; the general AWS Spot pool uses EBS and timed out after an
+hour while still running the 100k-term flush scenario. The 1M-record WAL
+replay scenario requires still more individually synced writes. Routing
+preserves the scenario sizes, warmups, sample counts, comparison thresholds
+and one-hour timeout. The `fts-storage-benchmark` resource group prevents
+this project's full benchmark runs from competing with each other. Other
+projects can still share the runner, so the existing advisory status remains.
+
 To refresh the baseline locally:
 
 ```bash
