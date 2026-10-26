@@ -2,7 +2,22 @@
 // Copyright (c) 2024-2026 CodePros
 
 const std = @import("std");
+const builtin = @import("builtin");
 const crypto_backend = @import("crypto_backend");
+
+/// Open a storage file without following a replacement symlink.
+/// Zig 0.16.0 opens Windows no-follow handles asynchronously but labels them
+/// blocking. Correct that metadata so positional reads await I/O completion.
+/// These handles require explicit offsets; do not use streaming reads on them.
+pub fn openFileNoFollow(io: std.Io, dir: std.Io.Dir, path: []const u8) std.Io.File.OpenError!std.Io.File {
+    var file = try dir.openFile(io, path, .{ .follow_symlinks = false });
+    if (builtin.os.tag == .windows and
+        builtin.zig_version.major == 0 and builtin.zig_version.minor == 16 and builtin.zig_version.patch == 0)
+    {
+        file.flags.nonblocking = true;
+    }
+    return file;
+}
 
 /// Returns a `std.Io.File.Permissions` (which is structurally the same as
 /// `std.Io.Dir.Permissions`) carrying the requested POSIX mode bits on
