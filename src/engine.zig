@@ -445,8 +445,9 @@ pub const Engine = struct {
             }
         }
 
-        // Open WAL for writing
+        // Open WAL for appends and size queries. Windows stat requires read access.
         engine.wal_file = try engine.wal_dir.createFile(io, "fts.wal", .{
+            .read = true,
             .truncate = false,
             .permissions = utils.fileMode(0o600),
         });
@@ -1232,6 +1233,7 @@ pub const Engine = struct {
         self.wal_writer.deinit();
         self.wal_file.close(self.io);
         self.wal_file = try self.wal_dir.createFile(self.io, "fts.wal", .{
+            .read = true,
             .truncate = true,
             .permissions = utils.fileMode(0o600),
         });

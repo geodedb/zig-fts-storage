@@ -130,6 +130,7 @@ pub const WalWriter = struct {
     /// (SEC-02, SEC-EXT-0401, GAP-0027).
     hmac_key: ?[]const u8 = null,
 
+    /// The file must allow reading and writing: initialization queries its size.
     pub fn init(io: std.Io, file: std.Io.File, allocator: Allocator) !WalWriter {
         const stat = try file.stat(io);
         return .{
@@ -437,7 +438,7 @@ test "WalReader reads records sequentially" {
 
     // Write records
     {
-        const file = try tmp_dir.dir.createFile(io, file_path, .{});
+        const file = try tmp_dir.dir.createFile(io, file_path, .{ .read = true });
         defer file.close(io);
         var writer = try WalWriter.init(io, file, alloc);
         defer writer.deinit();
@@ -534,7 +535,7 @@ test "WalReader.consumed tracks validated bytes and freezes at a torn tail (GSP-
     var rec1_len: u64 = 0;
     var rec2_len: u64 = 0;
     {
-        const file = try tmp_dir.dir.createFile(io, "wal_consumed.bin", .{});
+        const file = try tmp_dir.dir.createFile(io, "wal_consumed.bin", .{ .read = true });
         defer file.close(io);
         var writer = try WalWriter.init(io, file, alloc);
         defer writer.deinit();
