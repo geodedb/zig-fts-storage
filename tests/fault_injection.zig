@@ -162,7 +162,7 @@ test "fault: writes after torn-tail recovery survive the next reopen (GSP-2)" {
     {
         var wal_dir = try tmp_dir.dir.openDir(io, "wal", .{});
         defer wal_dir.close(io);
-        const f = try wal_dir.createFile(io, "fts.wal", .{ .truncate = false });
+        const f = try wal_dir.createFile(io, "fts.wal", .{ .read = true, .truncate = false });
         defer f.close(io);
         const stat = try f.stat(io);
         try f.writePositionalAll(io, &[_]u8{0xAA} ** 40, stat.size);
@@ -212,7 +212,7 @@ test "fault: uncommitted orphan txn is never resurrected by txn-id reuse (GSP-3)
     {
         var wal_dir = try tmp_dir.dir.openDir(io, "wal", .{});
         defer wal_dir.close(io);
-        const f = try wal_dir.createFile(io, "fts.wal", .{ .truncate = false });
+        const f = try wal_dir.createFile(io, "fts.wal", .{ .read = true, .truncate = false });
         defer f.close(io);
         var writer = try fts.wal.WalWriter.init(io, f, alloc);
         defer writer.deinit();
@@ -290,7 +290,7 @@ test "fault: skipped unknown-type WAL record still heals txn allocator (GSP-3 fo
     {
         var wal_dir = try tmp_dir.dir.openDir(io, "wal", .{});
         defer wal_dir.close(io);
-        const f = try wal_dir.createFile(io, "fts.wal", .{ .truncate = false });
+        const f = try wal_dir.createFile(io, "fts.wal", .{ .read = true, .truncate = false });
         defer f.close(io);
         const stat = try f.stat(io);
 

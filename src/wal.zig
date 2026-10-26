@@ -130,6 +130,7 @@ pub const WalWriter = struct {
     /// (SEC-02, SEC-EXT-0401, GAP-0027).
     hmac_key: ?[]const u8 = null,
 
+    /// The file must allow reading and writing: initialization queries its size.
     pub fn init(io: std.Io, file: std.Io.File, allocator: Allocator) !WalWriter {
         const stat = try file.stat(io);
         return .{
@@ -216,6 +217,9 @@ pub const WalReader = struct {
     /// so it is exactly the safe truncation point for recovery (GSP-1,
     /// graph-storage parity: recovery frontier discipline).
     consumed: u64 = 0,
+    /// Explicit read position, separate from the validated recovery frontier.
+    /// Windows asynchronous no-follow handles do not have a streaming cursor.
+    read_offset: u64 = 0,
 
     pub fn init(io: std.Io, file: std.Io.File, allocator: Allocator) WalReader {
         return .{
@@ -236,6 +240,13 @@ pub const WalReader = struct {
         return r;
     }
 
+    fn readNext(self: *WalReader, buffer: []u8) !usize {
+        const count = try self.file.readPositional(self.io, &.{buffer}, self.read_offset);
+        if (count == 0) return error.EndOfStream;
+        self.read_offset += count;
+        return count;
+    }
+
     /// Reads the next WAL record from the file.
     /// Returns null if EOF is reached.
     /// Returns an error if the record is corrupt or incomplete.
@@ -252,8 +263,7 @@ pub const WalReader = struct {
     /// is left at the last good record, not advanced past this one.
     pub fn next(self: *WalReader) !?WalRecord {
         var header_buf: [1 + 8 + 8 + 4]u8 = undefined;
-        var header_iov = [_][]u8{&header_buf};
-        const read_header = self.file.readStreaming(self.io, &header_iov) catch |err| switch (err) {
+        const read_header = self.readNext(&header_buf) catch |err| switch (err) {
             error.EndOfStream => return null,
             else => return err,
         };
@@ -277,8 +287,7 @@ pub const WalReader = struct {
         const payload_and_crc = try self.allocator.alloc(u8, payload_len + 4);
         defer self.allocator.free(payload_and_crc);
 
-        var payload_iov = [_][]u8{payload_and_crc};
-        const read_payload = try self.file.readStreaming(self.io, &payload_iov);
+        const read_payload = try self.readNext(payload_and_crc);
         if (read_payload < payload_len + 4) return error.Incomplete;
 
         const payload = payload_and_crc[0..payload_len];
@@ -303,8 +312,7 @@ pub const WalReader = struct {
             // fips-exempt: compile-time tag length only (HMAC goes through the seam).
             const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
             var stored_tag: [Hmac.mac_length]u8 = undefined;
-            var tag_iov = [_][]u8{&stored_tag};
-            const read_tag = try self.file.readStreaming(self.io, &tag_iov);
+            const read_tag = try self.readNext(&stored_tag);
             if (read_tag < Hmac.mac_length) return error.Incomplete;
 
             // FIPS-0004: integrity HMAC-SHA256 via the seam. The one-shot seam
@@ -437,7 +445,7 @@ test "WalReader reads records sequentially" {
 
     // Write records
     {
-        const file = try tmp_dir.dir.createFile(io, file_path, .{});
+        const file = try tmp_dir.dir.createFile(io, file_path, .{ .read = true });
         defer file.close(io);
         var writer = try WalWriter.init(io, file, alloc);
         defer writer.deinit();
@@ -453,7 +461,7 @@ test "WalReader reads records sequentially" {
 
     // Read records
     {
-        const file = try tmp_dir.dir.openFile(io, file_path, .{});
+        const file = try utils.openFileNoFollow(io, tmp_dir.dir, file_path);
         defer file.close(io);
         var reader = WalReader.init(io, file, alloc);
 
@@ -534,7 +542,7 @@ test "WalReader.consumed tracks validated bytes and freezes at a torn tail (GSP-
     var rec1_len: u64 = 0;
     var rec2_len: u64 = 0;
     {
-        const file = try tmp_dir.dir.createFile(io, "wal_consumed.bin", .{});
+        const file = try tmp_dir.dir.createFile(io, "wal_consumed.bin", .{ .read = true });
         defer file.close(io);
         var writer = try WalWriter.init(io, file, alloc);
         defer writer.deinit();

@@ -240,19 +240,27 @@ zig-test-macos-stress-0.16.0:
   rules: *cross-os-rules
   needs: ["zig-build-macos-0.16.0"]
 
+# Exercise Windows file handling before merging storage changes. Keep the
+# existing main/schedule/manual behavior for other changes.
+.windows-validation-rules:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: ["src/**/*", "tests/**/*", "build.zig", "build.zig.zon", ".gitlab-ci.yml"]
+    - !reference [.cross-os-rules]
+
 zig-build-windows-0.16.0:
-  rules: *cross-os-rules
+  rules: !reference [.windows-validation-rules, rules]
 
 zig-test-windows-unit-0.16.0:
-  rules: *cross-os-rules
+  rules: !reference [.windows-validation-rules, rules]
   needs: ["zig-build-windows-0.16.0"]
 
 zig-test-windows-integration-0.16.0:
-  rules: *cross-os-rules
+  rules: !reference [.windows-validation-rules, rules]
   needs: ["zig-build-windows-0.16.0"]
 
 zig-test-windows-stress-0.16.0:
-  rules: *cross-os-rules
+  rules: !reference [.windows-validation-rules, rules]
   needs: ["zig-build-windows-0.16.0"]
 
 # ---------------------------------------------------------------

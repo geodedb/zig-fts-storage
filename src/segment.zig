@@ -490,7 +490,7 @@ pub const SegmentReader = struct {
 
         // SEC-EXT-0301: O_NOFOLLOW on postings.bin too. Opened once at init
         // and held for the reader's lifetime (WRK-033).
-        const postings_file = try seg_dir.openFile(io, "postings.bin", .{ .follow_symlinks = false });
+        const postings_file = try utils.openFileNoFollow(io, seg_dir, "postings.bin");
         errdefer postings_file.close(io);
 
         var seg = SegmentReader{
@@ -725,7 +725,7 @@ pub const SegmentReader = struct {
     /// (WRK-038, GAP-0009, SEC-EXT-0402). Returns null when the file does
     /// not exist. SEC-EXT-0301: refuses to follow symlinks.
     fn readSegmentFile(self: *SegmentReader, name: []const u8, expect: FileFormat) !?[]u8 {
-        const file = self.seg_dir.openFile(self.io, name, .{ .follow_symlinks = false }) catch |err| {
+        const file = utils.openFileNoFollow(self.io, self.seg_dir, name) catch |err| {
             if (err == error.FileNotFound) return null;
             return err;
         };

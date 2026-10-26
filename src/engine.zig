@@ -445,8 +445,9 @@ pub const Engine = struct {
             }
         }
 
-        // Open WAL for writing
+        // Open WAL for appends and size queries. Windows stat requires read access.
         engine.wal_file = try engine.wal_dir.createFile(io, "fts.wal", .{
+            .read = true,
             .truncate = false,
             .permissions = utils.fileMode(0o600),
         });
@@ -526,7 +527,7 @@ pub const Engine = struct {
         // SEC-EXT-0301: refuse to follow symlinks so an adversary with
         // directory write access cannot redirect manifest reads at a sensitive
         // file (e.g. swap manifest.a for a symlink to /etc/passwd).
-        const file = try dir.openFile(io, path, .{ .follow_symlinks = false });
+        const file = try utils.openFileNoFollow(io, dir, path);
         defer file.close(io);
         const stat = try file.stat(io);
         if (stat.size > limits.MAX_MANIFEST_BYTES) return error.ManifestTooLarge;
@@ -618,7 +619,7 @@ pub const Engine = struct {
         // SEC-EXT-0301: O_NOFOLLOW on the WAL — an attacker with write access
         // to the wal/ directory must not be able to redirect replay through a
         // symlink.
-        const file = self.wal_dir.openFile(self.io, "fts.wal", .{ .follow_symlinks = false }) catch |err| {
+        const file = utils.openFileNoFollow(self.io, self.wal_dir, "fts.wal") catch |err| {
             if (err == error.FileNotFound) return 0;
             return err;
         };
@@ -1232,6 +1233,7 @@ pub const Engine = struct {
         self.wal_writer.deinit();
         self.wal_file.close(self.io);
         self.wal_file = try self.wal_dir.createFile(self.io, "fts.wal", .{
+            .read = true,
             .truncate = true,
             .permissions = utils.fileMode(0o600),
         });
