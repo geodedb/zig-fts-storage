@@ -36,7 +36,7 @@ repos:
 
   # Markdown linting
 - repo: https://github.com/igorshubovych/markdownlint-cli
-  rev: 5b5dddc4fb0f83c3ea1fc5616fa63e115dce83e0  # frozen: v0.49.1
+  rev: cbcdc463be5464e25e3e955a511599a67b9b987f  # frozen: v0.50.0
   hooks:
   - id: markdownlint
     args: [--config, .markdownlint.json]
@@ -52,7 +52,7 @@ repos:
 
   # Conventional commits
 - repo: https://github.com/commitizen-tools/commitizen
-  rev: 57217c394fff5064bedd48421fe4b6f5f73aad47  # frozen: v4.19.2
+  rev: f690817de25831a37094ca35af5ada05c909ff1c  # frozen: v4.19.3
   hooks:
   - id: commitizen
     stages: [commit-msg]
